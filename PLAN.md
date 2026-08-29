@@ -1,5 +1,8 @@
 # Plan de Trabajo: zek
 
+> **Estado: completo.** Fases 0–9 finalizadas. El soporte de OpenCode (`type: opencode`)
+> se agregó como extra (análogo a la Fase 5 de Claude).
+
 **zek** es una app de terminal escrita en Rust que ejecuta flujos de comandos predefinidos. Se invoca como `zek` y permite:
 
 - Ejecutar comandos definidos en YAML
