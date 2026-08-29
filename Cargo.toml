@@ -10,7 +10,7 @@ rust-version = "1.80"
 authors = ["thezeeck"]
 repository = "https://github.com/thezeeck/zek"
 homepage = "https://github.com/thezeeck/zek"
-keywords = ["cli", "workflow", "orchestrator", "rust", "terminal", "claude", "opencode"]
+keywords = ["cli", "workflow", "orchestrator", "claude", "opencode"]
 categories = ["command-line-utilities", "development-tools"]
 
 # The profile that 'dist' will build with
