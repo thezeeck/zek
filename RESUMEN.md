@@ -96,7 +96,7 @@ Objetivos del plan: build/install scripts, `cargo-dist` (metadata), GH Actions d
 
 **Bloqueado por dos datos que faltan:**
 - **URL del repositorio GitHub** (el plan tiene placeholder `https://github.com/youruser/zek`). Se preguntó al usuario y descartó la pregunta.
-- **Autor** para metadata. Git config actual: `Juan Sánchez <t-juansanchez@itesm.mx>`.
+- **Autor** para metadata. Git config actual: `Juan Sánchez <thezeeck@yahoo.com.mx>`.
 
 **Recomendación al retomar:** confirmar con el usuario la URL del repo (o saltar cargo-dist/release y hacer solo):
 1. Shell completions con `clap_complete`: subcomando `zek completion --shell <bash|zsh|fish>`.
