@@ -4,7 +4,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 
 #[derive(Parser)]
 #[command(
@@ -56,6 +57,12 @@ enum Command {
     Ask {
         /// Mensaje a enviar a claude -p
         message: String,
+    },
+    /// Genera el script de completions para un shell
+    Completion {
+        /// Shell objetivo
+        #[arg(long, value_enum)]
+        shell: Shell,
     },
     /// Ejecuta un flujo o comando por nombre
     #[command(external_subcommand)]
@@ -113,6 +120,12 @@ async fn run(cli: Cli) -> Result<i32> {
         }
         Some(Command::Ask { message }) => {
             commands::ask(&message).await?;
+            Ok(0)
+        }
+        Some(Command::Completion { shell }) => {
+            let mut cmd = Cli::command();
+            let bin_name = cmd.get_name().to_string();
+            generate(shell, &mut cmd, bin_name, &mut std::io::stdout());
             Ok(0)
         }
         Some(Command::Run(args)) => {
