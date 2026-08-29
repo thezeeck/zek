@@ -177,9 +177,10 @@ pub async fn ask(message: &str) -> Result<()> {
     }
 }
 
-/// `zek <nombre>`: ejecuta un flujo o un comando por nombre.
+/// `zek <nombre> [--clave valor ...]`: ejecuta un flujo o un comando por nombre.
 pub async fn run_by_name(
     name: &str,
+    args: &[String],
     dry_run: bool,
     verbose: bool,
     debug: bool,
@@ -188,33 +189,35 @@ pub async fn run_by_name(
     let config = ensure_config()?;
     let commands = core_commands::load_all(&config.commands_dir())?;
     let flows = core_flows::load_all(&config.flows_dir())?;
+    let opts = RunOptions {
+        dry_run,
+        verbose,
+        debug,
+        timeout_global,
+    };
 
     if let Some(loaded) = flows.get(name) {
-        return run_flow(
-            &config,
-            &commands,
-            loaded,
-            dry_run,
-            verbose,
-            debug,
-            timeout_global,
-        )
-        .await;
+        return run_flow(&config, &commands, loaded, args, &opts).await;
     }
     if let Some(loaded) = commands.get(name) {
-        return run_command(&config, loaded, timeout_global).await;
+        return run_command(&config, loaded, &opts).await;
     }
     bail!("no existe el flujo ni el comando: {name}");
+}
+
+struct RunOptions {
+    dry_run: bool,
+    verbose: bool,
+    debug: bool,
+    timeout_global: Option<u64>,
 }
 
 async fn run_flow(
     config: &Config,
     commands: &HashMap<String, LoadedCommand>,
     loaded: &LoadedFlow,
-    dry_run: bool,
-    verbose: bool,
-    debug: bool,
-    timeout_global: Option<u64>,
+    args: &[String],
+    opts: &RunOptions,
 ) -> Result<i32> {
     let flow = &loaded.flow;
 
@@ -222,17 +225,20 @@ async fn run_flow(
         eprintln!("warning: {warning} (en {})", loaded.source.display());
     }
 
-    if dry_run {
+    if opts.dry_run {
         print_plan(flow);
         return Ok(0);
     }
 
+    let params = parse_params(args);
+
     let runner = FlowRunner::new(flow, commands, config.workdir.clone(), true)
+        .with_args(params)
         .on_progress(Arc::new(print_progress))
         .on_confirm(Arc::new(confirm_step));
 
     let run_future = runner.run();
-    let report = match timeout_global {
+    let report = match opts.timeout_global {
         Some(secs) => match tokio::time::timeout(Duration::from_secs(secs), run_future).await {
             Ok(res) => res?,
             Err(_) => bail!("timeout global excedido ({secs}s)"),
@@ -240,15 +246,11 @@ async fn run_flow(
         None => run_future.await?,
     };
 
-    print_summary(flow, &report, verbose, debug);
+    print_summary(flow, &report, opts.verbose, opts.debug);
     Ok(report.exit_code())
 }
 
-async fn run_command(
-    config: &Config,
-    loaded: &LoadedCommand,
-    timeout_global: Option<u64>,
-) -> Result<i32> {
+async fn run_command(config: &Config, loaded: &LoadedCommand, opts: &RunOptions) -> Result<i32> {
     let cmd = &loaded.command;
     let cwd = cmd.cwd.as_deref().map(|c| {
         let p = PathBuf::from(c);
@@ -259,7 +261,8 @@ async fn run_command(
         }
     });
 
-    let timeout = timeout_global
+    let timeout = opts
+        .timeout_global
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(cmd.timeout as u64));
     let mut executor = CommandExecutor::new(cmd.run.clone())
@@ -437,6 +440,32 @@ fn format_duration(d: Duration) -> String {
     }
 }
 
+/// Parsea argumentos de CLI como pares clave/valor para `{{args.<clave>}}`.
+/// Acepta `--clave valor`, `--clave=valor` y `--flag` (que queda como "").
+fn parse_params(args: &[String]) -> HashMap<String, String> {
+    let mut params = HashMap::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if let Some(rest) = arg.strip_prefix("--") {
+            if rest.is_empty() {
+                i += 1;
+                continue;
+            }
+            if let Some((key, value)) = rest.split_once('=') {
+                params.insert(key.to_string(), value.to_string());
+            } else if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                params.insert(rest.to_string(), args[i + 1].clone());
+                i += 1;
+            } else {
+                params.insert(rest.to_string(), String::new());
+            }
+        }
+        i += 1;
+    }
+    params
+}
+
 fn status(path: &Path) -> &'static str {
     if path.is_dir() {
         "ok"
@@ -520,4 +549,34 @@ fn expand_tilde(path: PathBuf) -> Result<PathBuf> {
         return Ok(home_dir()?.join(rest));
     }
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params(args: &[&str]) -> HashMap<String, String> {
+        let v: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        parse_params(&v)
+    }
+
+    #[test]
+    fn parsea_clave_valor_y_flag() {
+        let p = params(&["--branch", "feature-x", "--force"]);
+        assert_eq!(p.get("branch").map(String::as_str), Some("feature-x"));
+        assert_eq!(p.get("force").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn parsea_clave_igual_valor() {
+        let p = params(&["--branch=feature-x"]);
+        assert_eq!(p.get("branch").map(String::as_str), Some("feature-x"));
+    }
+
+    #[test]
+    fn ignora_argumentos_posicionales() {
+        let p = params(&["extra", "--branch", "x"]);
+        assert_eq!(p.get("branch").map(String::as_str), Some("x"));
+        assert!(!p.contains_key("extra"));
+    }
 }

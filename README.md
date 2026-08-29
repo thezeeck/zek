@@ -144,11 +144,31 @@ finally:
 
 ### Templating
 
-Los prompts usan [Handlebars](https://handlebarsjs.com/). Están disponibles
-`{{steps.<name>.<campo>}}` (con `status`, `stdout`, `stderr`, `exit_code`,
-`attempts`) y, dentro de `finally`, `{{flow.<campo>}}` (con `status`,
-`failed_steps` y `exit_reason`). Las variables faltantes se resuelven a cadena
-vacía.
+Los prompts y comandos usan [Handlebars](https://handlebarsjs.com/). Están
+disponibles `{{steps.<name>.<campo>}}` (con `status`, `stdout`, `stderr`,
+`exit_code`, `attempts`), `{{args.<clave>}}` (argumentos pasados por CLI) y,
+dentro de `finally`, `{{flow.<campo>}}` (con `status`, `failed_steps` y
+`exit_reason`). Las variables faltantes se resuelven a cadena vacía.
+
+### Argumentos por CLI
+
+Podés pasar parámetros a un flujo con `--clave valor` (o `--clave=valor`) y
+referenciarlos en el YAML como `{{args.<clave>}}`:
+
+```bash
+zek feature --branch mi-rama
+```
+
+```yaml
+name: feature
+steps:
+  - name: switch_main
+    type: command
+    command: git checkout main
+  - name: create_branch
+    type: command
+    command: git checkout -b "{{args.branch}}"
+```
 
 ## Referencia de CLI
 
@@ -161,6 +181,7 @@ zek commands <nombre>       # muestra un comando
 zek ask "<mensaje>"         # pregunta a Claude fuera de flujos
 zek completion --shell <sh> # genera completions (bash|zsh|fish|powershell|elvish)
 zek <flujo>|<comando>       # resuelve flujo primero, luego comando
+zek <flujo> --clave valor   # argumentos accesibles como {{args.clave}}
 ```
 
 Flags globales: `--dry-run`, `--verbose/-v`, `--debug`, `--timeout-global <seg>`.

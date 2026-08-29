@@ -129,15 +129,18 @@ async fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Some(Command::Run(args)) => {
-            let name = args
-                .first()
+            let mut iter = args.iter();
+            let name = iter
+                .next()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
             if name.is_empty() {
                 bail!("falta el nombre del flujo o comando");
             }
+            let rest: Vec<String> = iter.map(|s| s.to_string_lossy().into_owned()).collect();
             commands::run_by_name(
                 &name,
+                &rest,
                 cli.dry_run,
                 cli.verbose,
                 cli.debug,

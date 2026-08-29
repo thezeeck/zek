@@ -27,6 +27,8 @@ pub struct ExecutionContext {
     pub exit_reason: String,
     /// Steps que fueron alcanzados vía `goto` (para `entry_only_via_goto`).
     targeted: HashSet<String>,
+    /// Argumentos pasados por CLI (accesibles como `{{args.<clave>}}`).
+    args: HashMap<String, String>,
 }
 
 impl ExecutionContext {
@@ -71,6 +73,11 @@ impl ExecutionContext {
         self.exit_reason = exit_reason;
     }
 
+    /// Fija los argumentos pasados por CLI, disponibles como `{{args.<clave>}}`.
+    pub fn set_args(&mut self, args: HashMap<String, String>) {
+        self.args = args;
+    }
+
     /// Nombres de steps cuyo estado final no fue exitoso, en orden de ejecución.
     pub fn failed_step_names(&self) -> Vec<String> {
         self.order
@@ -111,8 +118,11 @@ impl ExecutionContext {
             );
         }
 
+        let args = serde_json::to_value(&self.args).unwrap_or_else(|_| json!({}));
+
         json!({
             "steps": steps,
+            "args": args,
             "flow": {
                 "status": self.flow_status.map(|s| s.as_str()).unwrap_or(""),
                 "failed_steps": self.failed_step_names().join(","),
@@ -207,5 +217,16 @@ mod tests {
         let ctx = ExecutionContext::new();
         let rendered = ctx.render("x={{steps.noexiste.stdout}}").unwrap();
         assert_eq!(rendered, "x=");
+    }
+
+    #[test]
+    fn render_expande_args() {
+        let mut ctx = ExecutionContext::new();
+        let mut args = HashMap::new();
+        args.insert("branch".to_string(), "feature-x".to_string());
+        ctx.set_args(args);
+
+        let rendered = ctx.render("branch={{args.branch}}").unwrap();
+        assert_eq!(rendered, "branch=feature-x");
     }
 }

@@ -69,6 +69,7 @@ pub struct FlowRunner<'a> {
     opencode_session: Mutex<Option<String>>,
     progress: Option<Arc<ProgressCb>>,
     confirm: Option<Arc<ConfirmCb>>,
+    args: HashMap<String, String>,
 }
 
 impl<'a> FlowRunner<'a> {
@@ -122,6 +123,7 @@ impl<'a> FlowRunner<'a> {
             opencode_session: Mutex::new(None),
             progress: None,
             confirm: None,
+            args: HashMap::new(),
         }
     }
 
@@ -137,9 +139,16 @@ impl<'a> FlowRunner<'a> {
         self
     }
 
+    /// Argumentos pasados por CLI, disponibles como `{{args.<clave>}}`.
+    pub fn with_args(mut self, args: HashMap<String, String>) -> Self {
+        self.args = args;
+        self
+    }
+
     pub async fn run(&self) -> Result<FlowReport, ZekError> {
         let start = Instant::now();
         let mut ctx = ExecutionContext::new();
+        ctx.set_args(self.args.clone());
         let mut skipped = Vec::new();
 
         let (mut status, mut exit_reason) = self.run_main(&mut ctx, &mut skipped).await?;
@@ -362,7 +371,7 @@ impl<'a> FlowRunner<'a> {
     ) -> Result<SerializedStepResult, ZekError> {
         let start = Instant::now();
         let (status, attempts) = match step.step_type {
-            StepType::Command => self.run_command_step(step).await?,
+            StepType::Command => self.run_command_step(step, ctx).await?,
             StepType::Claude => self.run_claude_step(step, ctx).await?,
             StepType::Opencode => self.run_opencode_step(step, ctx).await?,
         };
@@ -375,16 +384,21 @@ impl<'a> FlowRunner<'a> {
         Ok(result)
     }
 
-    async fn run_command_step(&self, step: &Step) -> Result<(StepExecutionStatus, u32), ZekError> {
+    async fn run_command_step(
+        &self,
+        step: &Step,
+        ctx: &ExecutionContext,
+    ) -> Result<(StepExecutionStatus, u32), ZekError> {
         let resolved = resolve_command(step, self.commands).ok_or_else(|| {
             ZekError::InvalidConfig(format!(
                 "el step '{}' de tipo command no tiene comando definido",
                 step.name
             ))
         })?;
+        let run = ctx.render(&resolved.run)?;
         let cwd = resolve_cwd(resolved.cwd.as_deref(), &self.workdir);
 
-        let mut executor = CommandExecutor::new(resolved.run)
+        let mut executor = CommandExecutor::new(run)
             .timeout(resolved.timeout)
             .stream(self.stream);
         if let Some(cwd) = cwd {
@@ -564,6 +578,28 @@ mod tests {
         assert_eq!(
             report.results.get("a").unwrap().status.stdout().trim(),
             "hola"
+        );
+    }
+
+    #[tokio::test]
+    async fn args_se_renderizan_en_comandos() {
+        let flow = Flow::from_str(
+            "name: f\nsteps:\n  - name: create\n    type: command\n    command: echo {{args.branch}}\n",
+            Path::new("test.yaml"),
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let commands = HashMap::new();
+        let mut args = HashMap::new();
+        args.insert("branch".to_string(), "feature-x".to_string());
+        let runner =
+            FlowRunner::new(&flow, &commands, tmp.path().to_path_buf(), false).with_args(args);
+        let report = runner.run().await.unwrap();
+
+        assert_eq!(report.status, FlowFinalStatus::Success);
+        assert_eq!(
+            report.results.get("create").unwrap().status.stdout().trim(),
+            "feature-x"
         );
     }
 
