@@ -1,0 +1,9 @@
+name: valid
+description: Flujo válido con dos steps de comando
+steps:
+  - name: build
+    type: command
+    command: echo hola
+  - name: test
+    type: command
+    command: echo test

@@ -1,0 +1,11 @@
+name: infinite_loop
+max_jumps: 3
+steps:
+  - name: a
+    type: command
+    command: echo a
+    on_success: goto:b
+  - name: b
+    type: command
+    command: echo b
+    on_success: goto:a

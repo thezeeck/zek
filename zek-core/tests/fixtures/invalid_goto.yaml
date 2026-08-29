@@ -1,0 +1,6 @@
+name: invalid_goto
+steps:
+  - name: build
+    type: command
+    command: echo hola
+    on_error: goto:noexiste

@@ -1,0 +1,10 @@
+name: static_cycle
+steps:
+  - name: a
+    type: command
+    command: echo a
+    on_error: goto:b
+  - name: b
+    type: command
+    command: echo b
+    on_error: goto:a

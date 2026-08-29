@@ -1,0 +1,19 @@
+[package]
+name = "zek-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "CLI de zek: workflow orchestrator"
+
+[[bin]]
+name = "zek"
+path = "src/main.rs"
+
+[dependencies]
+zek-core = { path = "../zek-core" }
+clap = { version = "4", features = ["derive"] }
+dialoguer = "0.11"
+anyhow = "1"
+colored = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
