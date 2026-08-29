@@ -7,3 +7,13 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.80"
+authors = ["thezeeck"]
+repository = "https://github.com/thezeeck/zek"
+homepage = "https://github.com/thezeeck/zek"
+keywords = ["cli", "workflow", "orchestrator", "rust", "terminal", "claude", "opencode"]
+categories = ["command-line-utilities", "development-tools"]
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
