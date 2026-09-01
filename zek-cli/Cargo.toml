@@ -16,7 +16,7 @@ name = "zek"
 path = "src/main.rs"
 
 [dependencies]
-zek-core = { path = "../zek-core", version = "0.1.1" }
+zek-core = { path = "../zek-core", version = "0.1.3" }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 dialoguer = "0.11"
