@@ -1,6 +1,8 @@
 use serde::de::{self, Deserializer};
 use serde::Deserialize;
 
+use crate::lang;
+
 pub const DEFAULT_TIMEOUT: u32 = 300;
 
 /// Tipo de step: ejecuta un comando o habla con Claude/OpenCode.
@@ -41,12 +43,8 @@ impl<'de> Deserialize<'de> for OnErrorAction {
                 Some(target) if !target.trim().is_empty() => {
                     Ok(OnErrorAction::Goto(target.trim().to_string()))
                 }
-                Some(_) => Err(de::Error::custom(
-                    "goto: requiere un nombre de step no vacío",
-                )),
-                None => Err(de::Error::custom(format!(
-                    "on_error inválido: '{s}' (esperado: stop | continue | goto:<step>)"
-                ))),
+                Some(_) => Err(de::Error::custom(lang::messages().val_goto_empty)),
+                None => Err(de::Error::custom(crate::t!(val_on_error_invalid, s))),
             },
         }
     }
@@ -65,12 +63,8 @@ impl<'de> Deserialize<'de> for OnSuccessAction {
                 Some(target) if !target.trim().is_empty() => {
                     Ok(OnSuccessAction::Goto(target.trim().to_string()))
                 }
-                Some(_) => Err(de::Error::custom(
-                    "goto: requiere un nombre de step no vacío",
-                )),
-                None => Err(de::Error::custom(format!(
-                    "on_success inválido: '{s}' (esperado: continue | end | goto:<step>)"
-                ))),
+                Some(_) => Err(de::Error::custom(lang::messages().val_goto_empty)),
+                None => Err(de::Error::custom(crate::t!(val_on_success_invalid, s))),
             },
         }
     }
@@ -243,7 +237,7 @@ mod tests {
             "name: x\ntype: command\ncommand: x\non_error: explotar\n",
         )
         .unwrap_err();
-        assert!(err.to_string().contains("on_error inválido"));
+        assert!(err.to_string().contains("invalid on_error"));
     }
 
     #[test]
@@ -252,7 +246,7 @@ mod tests {
             "name: x\ntype: command\ncommand: x\non_error: \"goto:\"\n",
         )
         .unwrap_err();
-        assert!(err.to_string().contains("no vacío"));
+        assert!(err.to_string().contains("non-empty"));
     }
 
     #[test]

@@ -5,6 +5,7 @@ use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ZekError;
+use crate::lang::Language;
 
 pub const CONFIG_FILENAME: &str = "config.yaml";
 pub const COMMANDS_DIR: &str = "commands";
@@ -14,11 +15,18 @@ pub const FLOWS_DIR: &str = "flows";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     pub workdir: PathBuf,
+
+    /// Idioma de los mensajes (`en`/`es`). Por defecto `en`.
+    #[serde(default)]
+    pub language: Language,
 }
 
 impl Config {
     pub fn new(workdir: PathBuf) -> Self {
-        Self { workdir }
+        Self {
+            workdir,
+            language: Language::default(),
+        }
     }
 
     /// Ruta absoluta del archivo `config.yaml` (independiente del workdir).
@@ -148,6 +156,14 @@ mod tests {
         let path = PathBuf::from("/irrelevante/config.yaml");
         let config = Config::from_str("workdir: /alguna/ruta\n", &path).unwrap();
         assert_eq!(config.workdir, PathBuf::from("/alguna/ruta"));
+        assert_eq!(config.language, Language::En);
+    }
+
+    #[test]
+    fn from_str_parsea_idioma() {
+        let path = PathBuf::from("/irrelevante/config.yaml");
+        let config = Config::from_str("workdir: /x\nlanguage: es\n", &path).unwrap();
+        assert_eq!(config.language, Language::Es);
     }
 
     #[test]

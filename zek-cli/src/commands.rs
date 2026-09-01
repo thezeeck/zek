@@ -15,7 +15,9 @@ use zek_core::error::{FlowFinalStatus, ZekError};
 use zek_core::exec::CommandExecutor;
 use zek_core::execution::{FlowReport, FlowRunner, StepProgress};
 use zek_core::flows::{self as core_flows, Flow, LoadedFlow};
+use zek_core::lang::{self, Language};
 use zek_core::step::StepType;
+use zek_core::t;
 
 /// `zek init [dir]`: configura zek por primera vez (o re-configura).
 pub fn init(dir: Option<PathBuf>) -> Result<()> {
@@ -30,10 +32,10 @@ pub fn init(dir: Option<PathBuf>) -> Result<()> {
     config.save()?;
 
     println!(
-        "\nConfiguración guardada en {}",
-        Config::config_path()?.display()
+        "\n{}",
+        t!(msg_config_saved, Config::config_path()?.display())
     );
-    println!("  workdir: {}", workdir.display());
+    println!("{}", t!(msg_workdir, workdir.display()));
     Ok(())
 }
 
@@ -41,8 +43,8 @@ pub fn init(dir: Option<PathBuf>) -> Result<()> {
 pub fn config_show() -> Result<()> {
     let config = ensure_config()?;
 
-    println!("Config : {}", Config::config_path()?.display());
-    println!("Workdir: {}", config.workdir.display());
+    println!("{}", t!(label_config, Config::config_path()?.display()));
+    println!("{}", t!(label_workdir, config.workdir.display()));
     println!(
         "  {:<8}: {} ({})",
         COMMANDS_DIR,
@@ -66,17 +68,31 @@ pub fn config_set_dir(path: PathBuf) -> Result<()> {
     let config = Config::new(workdir);
     config
         .validate()
-        .context("el nuevo workdir no es válido (debe existir y contener commands/ y flows/)")?;
+        .context(lang::messages().err_workdir_invalid)?;
     config.save()?;
 
-    println!("Workdir actualizado: {}", config.workdir.display());
+    println!("{}", t!(msg_workdir_updated, config.workdir.display()));
+    Ok(())
+}
+
+/// `zek config set-language <en|es>`: cambia el idioma de los mensajes.
+pub fn config_set_language(language: &str) -> Result<()> {
+    let mut config = ensure_config()?;
+
+    let lang = Language::parse(language)
+        .ok_or_else(|| anyhow::anyhow!(t!(err_language_invalid, language)))?;
+    config.language = lang;
+    config.save()?;
+    lang::set(lang);
+
+    println!("{}", t!(msg_language_updated, lang.as_str()));
     Ok(())
 }
 
 /// `zek` sin subcomando: asegura config y da una pista.
 pub fn run_default() -> Result<()> {
     ensure_config()?;
-    println!("zek está configurado. Usá `zek --help` para ver los comandos.");
+    println!("{}", lang::messages().msg_configured);
     Ok(())
 }
 
@@ -88,18 +104,18 @@ pub fn list() -> Result<()> {
 
     for flow in flows.values() {
         for warning in &flow.warnings {
-            eprintln!("warning: {warning} (en {})", flow.source.display());
+            eprintln!("{}", t!(warning_at, warning, flow.source.display()));
         }
         for warning in flow.flow.validate_command_refs(&commands) {
-            eprintln!("warning: {warning} (en {})", flow.source.display());
+            eprintln!("{}", t!(warning_at, warning, flow.source.display()));
         }
     }
 
-    println!("Comandos ({}):", config.commands_dir().display());
+    println!("{}", t!(label_commands, config.commands_dir().display()));
     let mut cmd_entries: Vec<_> = commands.values().collect();
     cmd_entries.sort_by_key(|c| c.command.name.as_str());
     if cmd_entries.is_empty() {
-        println!("  (ninguno)");
+        println!("  {}", lang::messages().label_none);
     } else {
         for c in cmd_entries {
             println!(
@@ -111,11 +127,11 @@ pub fn list() -> Result<()> {
         }
     }
 
-    println!("\nFlujos ({}):", config.flows_dir().display());
+    println!("\n{}", t!(label_flows, config.flows_dir().display()));
     let mut flow_entries: Vec<_> = flows.values().collect();
     flow_entries.sort_by_key(|f| f.flow.name.as_str());
     if flow_entries.is_empty() {
-        println!("  (ninguno)");
+        println!("  {}", lang::messages().label_none);
     } else {
         for f in flow_entries {
             println!(
@@ -137,23 +153,26 @@ pub fn show_command(name: &str) -> Result<()> {
 
     let loaded = commands
         .get(name)
-        .ok_or_else(|| anyhow::anyhow!("comando no encontrado: {name}"))?;
+        .ok_or_else(|| anyhow::anyhow!(t!(err_command_not_found, name)))?;
     let c = &loaded.command;
 
-    println!("Comando: {}", c.name);
+    println!("{}", t!(label_command, c.name));
     println!(
-        "  Descripción: {}",
-        if c.description.is_empty() {
-            "-"
-        } else {
-            &c.description
-        }
+        "{}",
+        t!(
+            label_description,
+            if c.description.is_empty() {
+                "-"
+            } else {
+                &c.description
+            }
+        )
     );
-    println!("  Run: {}", c.run);
-    println!("  Cwd: {}", c.cwd.as_deref().unwrap_or("."));
-    println!("  Timeout: {}s", c.timeout);
-    println!("  Autor: {}", c.author.as_deref().unwrap_or("-"));
-    println!("  Fuente: {}", loaded.source.display());
+    println!("{}", t!(label_run, c.run));
+    println!("{}", t!(label_cwd, c.cwd.as_deref().unwrap_or(".")));
+    println!("{}", t!(label_timeout, c.timeout));
+    println!("{}", t!(label_author, c.author.as_deref().unwrap_or("-")));
+    println!("{}", t!(label_source, loaded.source.display()));
     Ok(())
 }
 
@@ -173,7 +192,7 @@ pub async fn ask(message: &str) -> Result<()> {
         Ok(())
     } else {
         let code = status.exit_code().unwrap_or(-1);
-        bail!("claude terminó con error (exit code {code})");
+        bail!("{}", t!(err_claude_failed, code));
     }
 }
 
@@ -202,7 +221,7 @@ pub async fn run_by_name(
     if let Some(loaded) = commands.get(name) {
         return run_command(&config, loaded, &opts).await;
     }
-    bail!("no existe el flujo ni el comando: {name}");
+    bail!("{}", t!(err_name_not_found, name));
 }
 
 struct RunOptions {
@@ -222,7 +241,7 @@ async fn run_flow(
     let flow = &loaded.flow;
 
     for warning in &loaded.warnings {
-        eprintln!("warning: {warning} (en {})", loaded.source.display());
+        eprintln!("{}", t!(warning_at, warning, loaded.source.display()));
     }
 
     if opts.dry_run {
@@ -241,7 +260,7 @@ async fn run_flow(
     let report = match opts.timeout_global {
         Some(secs) => match tokio::time::timeout(Duration::from_secs(secs), run_future).await {
             Ok(res) => res?,
-            Err(_) => bail!("timeout global excedido ({secs}s)"),
+            Err(_) => bail!("{}", t!(err_timeout_exceeded, secs)),
         },
         None => run_future.await?,
     };
@@ -278,8 +297,8 @@ async fn run_command(config: &Config, loaded: &LoadedCommand, opts: &RunOptions)
     } else {
         eprintln!(
             "{}",
-            format!(
-                "comando '{}' falló (exit code {})",
+            t!(
+                err_command_failed,
                 cmd.name,
                 status.exit_code().unwrap_or(-1)
             )
@@ -310,20 +329,24 @@ fn print_progress(progress: StepProgress) {
 
 fn confirm_step(name: &str) -> bool {
     Confirm::new()
-        .with_prompt(format!("¿Ejecutar el step '{name}'?"))
+        .with_prompt(t!(confirm_step, name))
         .default(true)
         .interact()
         .unwrap_or(true)
 }
 
 fn print_plan(flow: &Flow) {
-    println!("{}", format!("Plan: {}", flow.name).bold());
+    println!("{}", t!(plan_label, flow.name).bold());
     for (i, step) in flow.steps.iter().enumerate() {
         let detail = match step.step_type {
-            StepType::Command => step.command.as_deref().unwrap_or("(sin comando)"),
-            StepType::Claude | StepType::Opencode => {
-                step.prompt.as_deref().unwrap_or("(sin prompt)")
-            }
+            StepType::Command => step
+                .command
+                .as_deref()
+                .unwrap_or(lang::messages().plan_no_command),
+            StepType::Claude | StepType::Opencode => step
+                .prompt
+                .as_deref()
+                .unwrap_or(lang::messages().plan_no_prompt),
         };
         let flag = if step.entry_only_via_goto {
             " [entry_only_via_goto]"
@@ -338,13 +361,17 @@ fn print_plan(flow: &Flow) {
         );
     }
     if let Some(fin) = &flow.finally {
-        println!("  finally:");
+        println!("{}", lang::messages().plan_finally);
         for (i, step) in fin.steps.iter().enumerate() {
             let detail = match step.step_type {
-                StepType::Command => step.command.as_deref().unwrap_or("(sin comando)"),
-                StepType::Claude | StepType::Opencode => {
-                    step.prompt.as_deref().unwrap_or("(sin prompt)")
-                }
+                StepType::Command => step
+                    .command
+                    .as_deref()
+                    .unwrap_or(lang::messages().plan_no_command),
+                StepType::Claude | StepType::Opencode => step
+                    .prompt
+                    .as_deref()
+                    .unwrap_or(lang::messages().plan_no_prompt),
             };
             println!(
                 "    {}. {:<20} {:?} -> {detail}",
@@ -364,10 +391,10 @@ fn print_summary(flow: &Flow, report: &FlowReport, verbose: bool, debug: bool) {
     };
 
     println!();
-    println!("{}", format!("══ Flow: {} ══", report.name).bold());
-    println!("Status   : {status_colored}");
-    println!("Exit code: {}", report.exit_code());
-    println!("Duration : {}", format_duration(report.duration));
+    println!("{}", t!(sum_flow, report.name).bold());
+    println!("{}", t!(sum_status, status_colored));
+    println!("{}", t!(sum_exit_code, report.exit_code()));
+    println!("{}", t!(sum_duration, format_duration(report.duration)));
 
     let mut types = HashMap::new();
     for step in &flow.steps {
@@ -380,7 +407,7 @@ fn print_summary(flow: &Flow, report: &FlowReport, verbose: bool, debug: bool) {
     }
 
     println!();
-    println!("Steps:");
+    println!("{}", lang::messages().sum_steps);
     for (name, result) in report.results.ordered_results() {
         let type_str = match types.get(&name) {
             Some(StepType::Command) => "command",
@@ -394,10 +421,10 @@ fn print_summary(flow: &Flow, report: &FlowReport, verbose: bool, debug: bool) {
             "✗".red()
         };
         println!(
-            "  {marker} {name:<20} ({type_str}, {}, {}, {} intento(s))",
+            "  {marker} {name:<20} ({type_str}, {}, {}, {})",
             result.status.status_str(),
             format_duration(result.duration),
-            result.attempts
+            t!(sum_attempts, result.attempts)
         );
     }
     for name in &report.skipped_steps {
@@ -408,16 +435,16 @@ fn print_summary(flow: &Flow, report: &FlowReport, verbose: bool, debug: bool) {
         println!();
         println!(
             "{}",
-            format!("Failed steps: {}", report.failed_steps.join(", ")).red()
+            t!(sum_failed_steps, report.failed_steps.join(", ")).red()
         );
-        println!("Exit reason: {}", report.exit_reason);
+        println!("{}", t!(sum_exit_reason, report.exit_reason));
     }
 
     if verbose || debug {
         for (name, result) in report.results.ordered_results() {
             if !result.status.is_success() {
                 println!();
-                println!("{}", format!("── output de {name} ──").yellow());
+                println!("{}", t!(sum_output_of, name).yellow());
                 if !result.status.stdout().trim().is_empty() {
                     println!("{}", result.status.stdout());
                 }
@@ -468,22 +495,25 @@ fn parse_params(args: &[String]) -> HashMap<String, String> {
 
 fn status(path: &Path) -> &'static str {
     if path.is_dir() {
-        "ok"
+        lang::messages().status_ok
     } else {
-        "missing"
+        lang::messages().status_missing
     }
 }
 
 /// Carga la config; si no existe, dispara el wizard de init automáticamente.
 fn ensure_config() -> Result<Config> {
     match Config::load() {
-        Ok(config) => Ok(config),
-        Err(ZekError::ConfigNotFound(_)) => {
-            println!("No se encontró configuración. Iniciando wizard de setup...\n");
-            init(None)?;
-            Config::load().context("no se pudo cargar la config tras el init")
+        Ok(config) => {
+            lang::set(config.language);
+            Ok(config)
         }
-        Err(e) => Err(e).context("error cargando la configuración"),
+        Err(ZekError::ConfigNotFound(_)) => {
+            println!("{}\n", lang::messages().msg_no_config);
+            init(None)?;
+            Config::load().context(lang::messages().err_config_after_init)
+        }
+        Err(e) => Err(e).context(lang::messages().err_config_load),
     }
 }
 
@@ -494,13 +524,13 @@ fn prompt_workdir() -> Result<PathBuf> {
         .to_string();
 
     let input: String = Input::new()
-        .with_prompt("Carpeta de trabajo (contendrá commands/ y flows/)")
+        .with_prompt(lang::messages().prompt_workdir)
         .default(default)
         .interact_text()?;
 
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        bail!("la carpeta de trabajo no puede estar vacía");
+        bail!("{}", lang::messages().err_workdir_empty);
     }
     expand_tilde(PathBuf::from(trimmed))
 }
@@ -509,27 +539,24 @@ fn prompt_workdir() -> Result<PathBuf> {
 fn ensure_workdir(workdir: &Path) -> Result<()> {
     if !workdir.exists() {
         let create = Confirm::new()
-            .with_prompt(format!(
-                "La carpeta {} no existe. ¿Crearla?",
-                workdir.display()
-            ))
+            .with_prompt(t!(prompt_create_dir, workdir.display()))
             .default(true)
             .interact()?;
         if !create {
-            bail!("init cancelado por el usuario");
+            bail!("{}", lang::messages().err_init_cancelled);
         }
         fs::create_dir_all(workdir)?;
     }
 
     if !workdir.is_dir() {
-        bail!("{} no es un directorio", workdir.display());
+        bail!("{}", t!(err_not_a_dir, workdir.display()));
     }
 
     for sub in [COMMANDS_DIR, FLOWS_DIR] {
         let p = workdir.join(sub);
         if !p.exists() {
             let create = Confirm::new()
-                .with_prompt(format!("Crear la carpeta {}?", p.display()))
+                .with_prompt(t!(prompt_create_subdir, p.display()))
                 .default(true)
                 .interact()?;
             if create {

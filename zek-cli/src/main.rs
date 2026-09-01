@@ -11,22 +11,22 @@ use clap_complete::{generate, Shell};
 #[command(
     name = "zek",
     version,
-    about = "Terminal workflow orchestrator con Claude y OpenCode"
+    about = "Terminal workflow orchestrator with Claude and OpenCode"
 )]
 struct Cli {
-    /// Previsualizar el plan de ejecución sin correrlo
+    /// Preview the execution plan without running it
     #[arg(long, global = true)]
     dry_run: bool,
 
-    /// Logs detallados
+    /// Verbose logs
     #[arg(short, long, global = true)]
     verbose: bool,
 
-    /// Debug extra (rutas, timestamps)
+    /// Extra debug (paths, timestamps)
     #[arg(long, global = true)]
     debug: bool,
 
-    /// Timeout global en segundos para todo el flujo
+    /// Global timeout in seconds for the whole flow
     #[arg(long, global = true)]
     timeout_global: Option<u64>,
 
@@ -36,47 +36,52 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Configura zek por primera vez (o re-configura)
+    /// Set up zek for the first time (or reconfigure)
     Init {
-        /// Carpeta de trabajo (si se omite, se pregunta interactivamente)
+        /// Working directory (if omitted, prompts interactively)
         dir: Option<PathBuf>,
     },
-    /// Muestra o modifica la configuración
+    /// Show or modify the configuration
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Lista los comandos y flujos disponibles
+    /// List available commands and flows
     List,
-    /// Muestra un comando específico
+    /// Show a specific command
     Commands {
-        /// Nombre del comando
+        /// Command name
         name: String,
     },
-    /// Pregunta algo a Claude fuera de flujos
+    /// Ask Claude something outside of flows
     Ask {
-        /// Mensaje a enviar a claude -p
+        /// Message to send to claude -p
         message: String,
     },
-    /// Genera el script de completions para un shell
+    /// Generate the completion script for a shell
     Completion {
-        /// Shell objetivo
+        /// Target shell
         #[arg(long, value_enum)]
         shell: Shell,
     },
-    /// Ejecuta un flujo o comando por nombre
+    /// Run a flow or command by name
     #[command(external_subcommand)]
     Run(Vec<OsString>),
 }
 
 #[derive(Subcommand)]
 enum ConfigCommand {
-    /// Muestra la configuración actual
+    /// Show the current configuration
     Show,
-    /// Cambia la carpeta de trabajo
+    /// Change the working directory
     SetDir {
-        /// Nueva carpeta de trabajo (debe contener commands/ y flows/)
+        /// New working directory (must contain commands/ and flows/)
         path: PathBuf,
+    },
+    /// Change the language (en/es)
+    SetLanguage {
+        /// Language code (en or es)
+        language: String,
     },
 }
 
@@ -93,6 +98,10 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<i32> {
+    if let Ok(config) = zek_core::config::Config::load() {
+        zek_core::lang::set(config.language);
+    }
+
     match cli.command {
         Some(Command::Init { dir }) => {
             commands::init(dir)?;
@@ -108,6 +117,12 @@ async fn run(cli: Cli) -> Result<i32> {
             command: ConfigCommand::SetDir { path },
         }) => {
             commands::config_set_dir(path)?;
+            Ok(0)
+        }
+        Some(Command::Config {
+            command: ConfigCommand::SetLanguage { language },
+        }) => {
+            commands::config_set_language(&language)?;
             Ok(0)
         }
         Some(Command::List) => {
@@ -135,7 +150,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
             if name.is_empty() {
-                bail!("falta el nombre del flujo o comando");
+                bail!(zek_core::lang::messages().err_missing_name);
             }
             let rest: Vec<String> = iter.map(|s| s.to_string_lossy().into_owned()).collect();
             commands::run_by_name(

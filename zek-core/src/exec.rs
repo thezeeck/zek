@@ -175,7 +175,7 @@ async fn run_command(cmd: Command, timeout_dur: Duration, stream: bool) -> StepE
         Err(e) => {
             return StepExecutionStatus::Failed {
                 stdout: String::new(),
-                stderr: format!("no se pudo lanzar el proceso: {e}"),
+                stderr: crate::t!(exec_spawn_failed, e),
                 exit_code: -1,
             };
         }
@@ -213,7 +213,7 @@ async fn run_command(cmd: Command, timeout_dur: Duration, stream: bool) -> StepE
             let _ = tokio::join!(stdout_task, stderr_task);
             StepExecutionStatus::Failed {
                 stdout: drain(&stdout_buf).await,
-                stderr: format!("error esperando el proceso: {e}"),
+                stderr: crate::t!(exec_wait_failed, e),
                 exit_code: -1,
             }
         }

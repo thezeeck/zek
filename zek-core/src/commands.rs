@@ -67,7 +67,7 @@ pub fn load_all(dir: &Path) -> Result<HashMap<String, LoadedCommand>, ZekError> 
             return Err(ZekError::validation(
                 &path,
                 0,
-                format!("nombre de comando duplicado: '{}'", command.name),
+                crate::t!(val_command_duplicate, command.name),
             ));
         }
         commands.insert(

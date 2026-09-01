@@ -8,6 +8,7 @@ pub mod error;
 pub mod exec;
 pub mod execution;
 pub mod flows;
+pub mod lang;
 pub mod opencode;
 pub mod parser;
 pub mod step;

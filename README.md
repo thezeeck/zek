@@ -49,6 +49,14 @@ zek ask "¿Cómo optimizo este código?"
 La configuración se guarda en `~/.config/zek/config.yaml`
 (o `$XDG_CONFIG_HOME/zek`, `%APPDATA%\zek` en Windows).
 
+El idioma de los mensajes se configura con la clave `language` (valores
+`en`/`es`, por defecto `en`):
+
+```yaml
+workdir: /ruta/a/mi-proyecto
+language: es
+```
+
 ## Estructura de carpetas
 
 ```
@@ -176,6 +184,7 @@ steps:
 zek init [dir]              # configura por primera vez (o re-configura)
 zek config show             # muestra la config actual
 zek config set-dir <path>   # cambia la carpeta de trabajo
+zek config set-language <lang>  # cambia el idioma (en | es, default en)
 zek list                    # comandos y flujos
 zek commands <nombre>       # muestra un comando
 zek ask "<mensaje>"         # pregunta a Claude fuera de flujos

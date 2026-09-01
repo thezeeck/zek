@@ -1,42 +1,74 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::lang;
+
 /// Error unificado de `zek`.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum ZekError {
-    #[error("no se pudo determinar el directorio home del usuario")]
     NoHomeDir,
-
-    #[error("no se encontró la configuración: {0}")]
     ConfigNotFound(PathBuf),
-
-    #[error("error de I/O: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("error de YAML en {path}:{line}: {source}")]
+    Io(std::io::Error),
     Yaml {
         path: PathBuf,
         line: usize,
-        #[source]
         source: serde_yaml::Error,
     },
-
-    #[error("configuración inválida: {0}")]
     InvalidConfig(String),
-
-    #[error("error de template: {0}")]
     Template(String),
-
-    #[error("{location}: {message}")]
-    Validation { location: String, message: String },
-
-    #[error("el directorio de trabajo no existe: {0}")]
+    Validation {
+        location: String,
+        message: String,
+    },
     WorkdirNotFound(PathBuf),
-
-    #[error("el directorio de trabajo no es un directorio: {0}")]
     WorkdirNotDir(PathBuf),
+    MissingDir {
+        dir: &'static str,
+        workdir: PathBuf,
+    },
+}
 
-    #[error("falta la carpeta '{dir}' en el workdir: {workdir}")]
-    MissingDir { dir: &'static str, workdir: PathBuf },
+impl fmt::Display for ZekError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoHomeDir => write!(f, "{}", lang::messages().err_no_home_dir),
+            Self::ConfigNotFound(path) => {
+                write!(f, "{}", crate::t!(err_config_not_found, path.display()))
+            }
+            Self::Io(e) => write!(f, "{}", crate::t!(err_io, e)),
+            Self::Yaml { path, line, source } => {
+                write!(f, "{}", crate::t!(err_yaml, path.display(), line, source))
+            }
+            Self::InvalidConfig(msg) => write!(f, "{}", crate::t!(err_invalid_config, msg)),
+            Self::Template(msg) => write!(f, "{}", crate::t!(err_template, msg)),
+            Self::Validation { location, message } => write!(f, "{location}: {message}"),
+            Self::WorkdirNotFound(path) => {
+                write!(f, "{}", crate::t!(err_workdir_not_found, path.display()))
+            }
+            Self::WorkdirNotDir(path) => {
+                write!(f, "{}", crate::t!(err_workdir_not_dir, path.display()))
+            }
+            Self::MissingDir { dir, workdir } => {
+                write!(f, "{}", crate::t!(err_missing_dir, dir, workdir.display()))
+            }
+        }
+    }
+}
+
+impl std::error::Error for ZekError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::Yaml { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for ZekError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
 }
 
 /// Estado final de un flujo.

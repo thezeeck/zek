@@ -221,8 +221,9 @@ impl<'a> FlowRunner<'a> {
                             idx = i;
                         }
                         None => {
-                            return Err(ZekError::InvalidConfig(format!(
-                                "goto a step inexistente: '{target}'"
+                            return Err(ZekError::InvalidConfig(crate::t!(
+                                val_goto_missing_short,
+                                target
                             )));
                         }
                     }
@@ -251,7 +252,7 @@ impl<'a> FlowRunner<'a> {
             MainOutcome::Stop(step) => (FlowFinalStatus::Failed, format!("stop:{step}")),
             MainOutcome::Aborted => (
                 FlowFinalStatus::Aborted,
-                format!("infinite_loop: se superaron {max_jumps} saltos"),
+                crate::t!(reason_infinite_loop, max_jumps),
             ),
         };
         Ok((status, reason))
@@ -389,12 +390,8 @@ impl<'a> FlowRunner<'a> {
         step: &Step,
         ctx: &ExecutionContext,
     ) -> Result<(StepExecutionStatus, u32), ZekError> {
-        let resolved = resolve_command(step, self.commands).ok_or_else(|| {
-            ZekError::InvalidConfig(format!(
-                "el step '{}' de tipo command no tiene comando definido",
-                step.name
-            ))
-        })?;
+        let resolved = resolve_command(step, self.commands)
+            .ok_or_else(|| ZekError::InvalidConfig(crate::t!(val_step_no_command, step.name)))?;
         let run = ctx.render(&resolved.run)?;
         let cwd = resolve_cwd(resolved.cwd.as_deref(), &self.workdir);
 

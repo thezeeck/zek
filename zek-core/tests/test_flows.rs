@@ -25,13 +25,13 @@ async fn flujo_valido_corre_exitoso() {
 #[test]
 fn flujo_con_goto_invalido_falla_al_cargar() {
     let err = Flow::load_with_validation(&fixture("invalid_goto.yaml")).unwrap_err();
-    assert!(err.to_string().contains("inexistente"));
+    assert!(err.to_string().contains("nonexistent"));
 }
 
 #[test]
 fn flujo_con_ciclo_estatico_avisa() {
     let (_, warnings) = Flow::load_with_validation(&fixture("static_cycle.yaml")).unwrap();
-    assert!(warnings.iter().any(|w| w.contains("ciclo")));
+    assert!(warnings.iter().any(|w| w.contains("cycle")));
 }
 
 #[tokio::test]

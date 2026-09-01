@@ -121,7 +121,7 @@ impl Flow {
                 return Err(ZekError::validation(
                     path,
                     li.line_of(&step.name),
-                    format!("nombre de step duplicado: '{}'", step.name),
+                    crate::t!(val_step_duplicate, step.name),
                 ));
             }
         }
@@ -140,17 +140,14 @@ impl Flow {
                     return Err(ZekError::validation(
                         path,
                         li.line_of(&step.name),
-                        format!(
-                            "el step '{}' de finally solapa con un step del flujo principal",
-                            step.name
-                        ),
+                        crate::t!(val_finally_overlap, step.name),
                     ));
                 }
                 if !finally_seen.insert(step.name.clone()) {
                     return Err(ZekError::validation(
                         path,
                         li.line_of(&step.name),
-                        format!("nombre de step duplicado en finally: '{}'", step.name),
+                        crate::t!(val_finally_duplicate, step.name),
                     ));
                 }
             }
@@ -192,11 +189,7 @@ impl Flow {
         self.referenced_commands()
             .into_iter()
             .filter(|name| !commands.contains_key(name))
-            .map(|name| {
-                format!(
-                    "el step referencia el comando '{name}' que no existe (¿comando crudo o typo?)"
-                )
-            })
+            .map(|name| crate::t!(val_cmd_ref_missing, name))
             .collect()
     }
 
@@ -212,17 +205,14 @@ impl Flow {
                 return Err(ZekError::validation(
                     path,
                     li.line_of(&step.name),
-                    format!("el step '{}' no puede hacer goto a sí mismo", step.name),
+                    crate::t!(val_goto_self, step.name),
                 ));
             }
             if !scope.contains(&target) {
                 return Err(ZekError::validation(
                     path,
                     li.line_of(&step.name),
-                    format!(
-                        "goto a step inexistente: '{target}' (desde '{}')",
-                        step.name
-                    ),
+                    crate::t!(val_goto_missing, target, step.name),
                 ));
             }
         }
@@ -233,10 +223,7 @@ impl Flow {
         let targeted: HashSet<String> = steps.iter().flat_map(|s| s.goto_targets()).collect();
         for step in steps {
             if step.entry_only_via_goto && !targeted.contains(&step.name) {
-                warnings.push(format!(
-                    "step muerto '{}': entry_only_via_goto pero ningún step lo referencia con goto",
-                    step.name
-                ));
+                warnings.push(crate::t!(val_dead_step, step.name));
             }
         }
     }
@@ -259,7 +246,7 @@ impl Flow {
 
         for cycle in detect_cycles(&graph) {
             let names: Vec<String> = cycle.iter().map(|&i| steps[i].name.clone()).collect();
-            warnings.push(format!("ciclo estático detectado: {}", names.join(" -> ")));
+            warnings.push(crate::t!(val_static_cycle, names.join(" -> ")));
         }
     }
 }
@@ -273,7 +260,7 @@ pub fn load_all(dir: &Path) -> Result<HashMap<String, LoadedFlow>, ZekError> {
             return Err(ZekError::validation(
                 &path,
                 0,
-                format!("nombre de flujo duplicado: '{}'", flow.name),
+                crate::t!(val_flow_duplicate, flow.name),
             ));
         }
         flows.insert(
@@ -395,7 +382,7 @@ mod tests {
         let err = validate_err(
             "name: dup\nsteps:\n  - name: build\n    type: command\n    command: build\n  - name: build\n    type: command\n    command: test\n",
         );
-        assert!(err.to_string().contains("duplicado"));
+        assert!(err.to_string().contains("duplicate"));
     }
 
     #[test]
@@ -403,7 +390,7 @@ mod tests {
         let err = validate_err(
             "name: g\nsteps:\n  - name: build\n    type: command\n    command: build\n    on_error: goto:noexiste\n",
         );
-        assert!(err.to_string().contains("inexistente"));
+        assert!(err.to_string().contains("nonexistent"));
     }
 
     #[test]
@@ -411,7 +398,7 @@ mod tests {
         let err = validate_err(
             "name: s\nsteps:\n  - name: build\n    type: command\n    command: build\n    on_success: goto:build\n",
         );
-        assert!(err.to_string().contains("sí mismo"));
+        assert!(err.to_string().contains("cannot goto itself"));
     }
 
     #[test]
@@ -437,7 +424,7 @@ mod tests {
             "name: c\nsteps:\n  - name: a\n    type: command\n    command: a\n    on_error: goto:b\n  - name: b\n    type: command\n    command: b\n    on_error: goto:a\n",
         );
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("ciclo"));
+        assert!(warnings[0].contains("cycle"));
     }
 
     #[test]
@@ -445,7 +432,7 @@ mod tests {
         let err = validate_err(
             "name: f\nsteps:\n  - name: build\n    type: command\n    command: build\nfinally:\n  steps:\n    - name: build\n      type: command\n      command: clean\n",
         );
-        assert!(err.to_string().contains("solapa"));
+        assert!(err.to_string().contains("overlaps"));
     }
 
     #[test]
@@ -453,7 +440,7 @@ mod tests {
         let err = validate_err(
             "name: f\nsteps:\n  - name: build\n    type: command\n    command: build\nfinally:\n  steps:\n    - name: clean\n      type: command\n      command: clean\n      on_error: goto:build\n",
         );
-        assert!(err.to_string().contains("inexistente"));
+        assert!(err.to_string().contains("nonexistent"));
     }
 
     #[test]
