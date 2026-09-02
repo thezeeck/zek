@@ -13,6 +13,7 @@ pub struct ClaudeOptions {
     pub timeout: Duration,
     pub stream: bool,
     pub cwd: Option<PathBuf>,
+    pub env: HashMap<String, String>,
 }
 
 /// Cliente simple para invocar `claude -p`.
@@ -54,7 +55,7 @@ impl ClaudeClient {
             &self.program,
             &args,
             opts.cwd.as_deref(),
-            &HashMap::new(),
+            &opts.env,
             opts.timeout,
             opts.stream,
         )
@@ -101,6 +102,7 @@ mod tests {
             timeout: Duration::from_secs(30),
             stream: false,
             cwd: None,
+            env: HashMap::new(),
         };
 
         let status = client.run("hola", &opts).await;
@@ -119,6 +121,7 @@ mod tests {
             timeout: Duration::from_secs(30),
             stream: false,
             cwd: None,
+            env: HashMap::new(),
         };
 
         let status = client.run("pregunta", &opts).await;

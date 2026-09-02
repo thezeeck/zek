@@ -74,6 +74,8 @@ description: "Compila el proyecto"
 run: "cargo build --release"
 cwd: "."
 timeout: 300
+env:
+  RUST_BACKTRACE: "1"
 ```
 
 ## Flujos (`flows/*.yaml`)
@@ -149,6 +151,7 @@ finally:
 | `continue_session` | bool | false | Solo `claude`/`opencode`: continuar la sesión anterior |
 | `model` | string | - | Solo `opencode`: modelo (`provider/model`) |
 | `agent` | string | - | Solo `opencode`: agente |
+| `env` | map | - | Variables de entorno extra para el step |
 
 ### Templating
 
@@ -157,6 +160,27 @@ disponibles `{{steps.<name>.<campo>}}` (con `status`, `stdout`, `stderr`,
 `exit_code`, `attempts`), `{{args.<clave>}}` (argumentos pasados por CLI) y,
 dentro de `finally`, `{{flow.<campo>}}` (con `status`, `failed_steps` y
 `exit_reason`). Las variables faltantes se resuelven a cadena vacía.
+
+### Variables de entorno y secretos
+
+Los `steps` y `commands` pueden definir un mapa `env` con variables de entorno
+adicionales. Los valores admiten placeholders (`{{args.<clave>}}`, etc.) y
+referencias a variables del proceso (`$VAR` o `${VAR}`), lo que permite pasar
+secretos sin hardcodearlos en el YAML:
+
+```yaml
+steps:
+  - name: deploy
+    type: command
+    command: ./deploy.sh
+    env:
+      DEPLOY_TOKEN: "${DEPLOY_TOKEN}"   # viene del entorno del proceso
+      ENV: staging
+```
+
+```bash
+DEPLOY_TOKEN=secret zek deploy
+```
 
 ### Argumentos por CLI
 
@@ -193,7 +217,9 @@ zek <flujo>|<comando>       # resuelve flujo primero, luego comando
 zek <flujo> --clave valor   # argumentos accesibles como {{args.clave}}
 ```
 
-Flags globales: `--dry-run`, `--verbose/-v`, `--debug`, `--timeout-global <seg>`.
+Flags globales: `--dry-run`, `--verbose/-v`, `--debug`, `--timeout-global <seg>`,
+`--log <archivo>` (guarda un log de la ejecución). Los flags globales van antes
+del nombre del flujo/comando: `zek --log run.log deploy`.
 
 Exit codes: `0` success, `2` failed, `3` aborted (loop infinito).
 

@@ -30,6 +30,10 @@ struct Cli {
     #[arg(long, global = true)]
     timeout_global: Option<u64>,
 
+    /// Log file to write execution details
+    #[arg(long, global = true)]
+    log: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -160,6 +164,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 cli.verbose,
                 cli.debug,
                 cli.timeout_global,
+                cli.log,
             )
             .await
         }

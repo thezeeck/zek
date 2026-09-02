@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -18,6 +19,7 @@ use zek_core::flows::{self as core_flows, Flow, LoadedFlow};
 use zek_core::lang::{self, Language};
 use zek_core::step::StepType;
 use zek_core::t;
+use zek_core::util::expand_env_vars;
 
 /// `zek init [dir]`: configura zek por primera vez (o re-configura).
 pub fn init(dir: Option<PathBuf>) -> Result<()> {
@@ -185,6 +187,7 @@ pub async fn ask(message: &str) -> Result<()> {
         timeout: Duration::from_secs(60),
         stream: true,
         cwd: None,
+        env: HashMap::new(),
     };
 
     let status = client.run(message, &opts).await;
@@ -204,6 +207,7 @@ pub async fn run_by_name(
     verbose: bool,
     debug: bool,
     timeout_global: Option<u64>,
+    log: Option<PathBuf>,
 ) -> Result<i32> {
     let config = ensure_config()?;
     let commands = core_commands::load_all(&config.commands_dir())?;
@@ -213,6 +217,7 @@ pub async fn run_by_name(
         verbose,
         debug,
         timeout_global,
+        log,
     };
 
     if let Some(loaded) = flows.get(name) {
@@ -229,6 +234,7 @@ struct RunOptions {
     verbose: bool,
     debug: bool,
     timeout_global: Option<u64>,
+    log: Option<PathBuf>,
 }
 
 async fn run_flow(
@@ -249,11 +255,18 @@ async fn run_flow(
         return Ok(0);
     }
 
+    let logger = Logger::open(opts.log.as_deref())?;
+    logger.log(&format!("flow started: {}", flow.name));
+
     let params = parse_params(args);
 
+    let progress_logger = logger.clone();
     let runner = FlowRunner::new(flow, commands, config.workdir.clone(), true)
         .with_args(params)
-        .on_progress(Arc::new(print_progress))
+        .on_progress(Arc::new(move |p| {
+            log_progress(&progress_logger, &p);
+            print_progress(p);
+        }))
         .on_confirm(Arc::new(confirm_step));
 
     let run_future = runner.run();
@@ -264,6 +277,12 @@ async fn run_flow(
         },
         None => run_future.await?,
     };
+
+    logger.log(&format!(
+        "flow finished: {} exit code {}",
+        report.status.as_str(),
+        report.exit_code()
+    ));
 
     print_summary(flow, &report, opts.verbose, opts.debug);
     Ok(report.exit_code())
@@ -280,6 +299,9 @@ async fn run_command(config: &Config, loaded: &LoadedCommand, opts: &RunOptions)
         }
     });
 
+    let logger = Logger::open(opts.log.as_deref())?;
+    logger.log(&format!("command started: {}", cmd.name));
+
     let timeout = opts
         .timeout_global
         .map(Duration::from_secs)
@@ -290,8 +312,16 @@ async fn run_command(config: &Config, loaded: &LoadedCommand, opts: &RunOptions)
     if let Some(cwd) = cwd {
         executor = executor.cwd(cwd);
     }
+    for (key, value) in &cmd.env {
+        executor = executor.env(key.clone(), expand_env_vars(value));
+    }
 
     let status = executor.execute().await;
+    logger.log(&format!(
+        "command finished: {} ({})",
+        cmd.name,
+        status.status_str()
+    ));
     if status.is_success() {
         Ok(0)
     } else {
@@ -464,6 +494,56 @@ fn format_duration(d: Duration) -> String {
         format!("{secs}s")
     } else {
         format!("{}ms", d.as_millis())
+    }
+}
+
+/// Escritor de log en modo append. Los mensajes se guardan con timestamp.
+#[derive(Clone)]
+struct Logger {
+    file: Option<Arc<Mutex<fs::File>>>,
+}
+
+impl Logger {
+    fn open(path: Option<&Path>) -> Result<Self> {
+        let file = match path {
+            Some(p) => {
+                let f = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(p)
+                    .with_context(|| t!(err_log_open, p.display()))?;
+                Some(Arc::new(Mutex::new(f)))
+            }
+            None => None,
+        };
+        Ok(Self { file })
+    }
+
+    fn log(&self, line: &str) {
+        if let Some(file) = &self.file {
+            if let Ok(mut file) = file.lock() {
+                let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f");
+                let _ = writeln!(file, "{ts}  {line}");
+                let _ = file.flush();
+            }
+        }
+    }
+}
+
+fn log_progress(logger: &Logger, progress: &StepProgress) {
+    match progress {
+        StepProgress::Started { name, index, total } => {
+            logger.log(&format!("step started: {name} ({}/{total})", index + 1));
+        }
+        StepProgress::Finished { name, status } => {
+            logger.log(&format!("step finished: {name} ({})", status.status_str()));
+            for line in status.stdout().lines() {
+                logger.log(&format!("  [stdout] {line}"));
+            }
+            for line in status.stderr().lines() {
+                logger.log(&format!("  [stderr] {line}"));
+            }
+        }
     }
 }
 

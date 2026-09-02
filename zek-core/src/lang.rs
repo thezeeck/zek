@@ -154,6 +154,7 @@ pub struct Messages {
     pub msg_workdir_updated: &'static str,
     pub msg_language_updated: &'static str,
     pub err_language_invalid: &'static str,
+    pub err_log_open: &'static str,
 }
 
 pub const EN: Messages = Messages {
@@ -262,6 +263,7 @@ pub const EN: Messages = Messages {
     msg_workdir_updated: "Workdir updated: {}",
     msg_language_updated: "Language updated: {}",
     err_language_invalid: "invalid language '{}' (expected: en | es)",
+    err_log_open: "could not open log file: {}",
 };
 
 pub const ES: Messages = Messages {
@@ -371,6 +373,7 @@ pub const ES: Messages = Messages {
     msg_workdir_updated: "Workdir actualizado: {}",
     msg_language_updated: "Idioma actualizado: {}",
     err_language_invalid: "idioma inválido '{}' (esperado: en | es)",
+    err_log_open: "no se pudo abrir el archivo de log: {}",
 };
 
 /// Devuelve el catálogo de mensajes para el idioma actual.

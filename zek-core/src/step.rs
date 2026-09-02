@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::de::{self, Deserializer};
 use serde::Deserialize;
 
@@ -139,6 +141,10 @@ pub struct Step {
     /// Pedir confirmación antes de ejecutar.
     #[serde(default)]
     pub confirm: bool,
+
+    /// Variables de entorno extra para el step (soporta `$VAR`/`${VAR}` y placeholders).
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 impl Step {

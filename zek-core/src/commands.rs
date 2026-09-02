@@ -31,6 +31,10 @@ pub struct Command {
 
     #[serde(default)]
     pub author: Option<String>,
+
+    /// Variables de entorno extra para el comando (soporta `$VAR`/`${VAR}` y placeholders).
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 /// Un comando cargado junto con el archivo del que proviene.

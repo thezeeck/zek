@@ -13,6 +13,7 @@ use crate::opencode::{
     extract_session_id as extract_opencode_session_id, OpencodeClient, OpencodeOptions,
 };
 use crate::step::{OnErrorAction, OnSuccessAction, Step, StepType};
+use crate::util::expand_env_vars;
 
 /// Máximo de saltos por defecto dentro de un bloque `finally`.
 pub const DEFAULT_FINALLY_MAX_JUMPS: usize = 5;
@@ -394,12 +395,16 @@ impl<'a> FlowRunner<'a> {
             .ok_or_else(|| ZekError::InvalidConfig(crate::t!(val_step_no_command, step.name)))?;
         let run = ctx.render(&resolved.run)?;
         let cwd = resolve_cwd(resolved.cwd.as_deref(), &self.workdir);
+        let env = prepare_env(&resolved.env, ctx)?;
 
         let mut executor = CommandExecutor::new(run)
             .timeout(resolved.timeout)
             .stream(self.stream);
         if let Some(cwd) = cwd {
             executor = executor.cwd(cwd);
+        }
+        for (key, value) in env {
+            executor = executor.env(key, value);
         }
 
         let (status, attempts) = execute_with_retries(
@@ -431,6 +436,7 @@ impl<'a> FlowRunner<'a> {
             timeout: Duration::from_secs(step.timeout as u64),
             stream: self.stream,
             cwd: Some(self.workdir.clone()),
+            env: prepare_env(&step.env, ctx)?,
         };
         let status = self.claude.run(&rendered, &opts).await;
 
@@ -463,6 +469,7 @@ impl<'a> FlowRunner<'a> {
             timeout: Duration::from_secs(step.timeout as u64),
             stream: self.stream,
             cwd: Some(self.workdir.clone()),
+            env: prepare_env(&step.env, ctx)?,
         };
         let status = self.opencode.run(&rendered, &opts).await;
 
@@ -508,6 +515,7 @@ struct ResolvedCommand {
     run: String,
     cwd: Option<String>,
     timeout: Duration,
+    env: HashMap<String, String>,
 }
 
 fn resolve_command(
@@ -515,20 +523,42 @@ fn resolve_command(
     commands: &HashMap<String, LoadedCommand>,
 ) -> Option<ResolvedCommand> {
     let name = step.command.as_deref()?;
-    if let Some(loaded) = commands.get(name) {
+    let mut env = HashMap::new();
+    let (run, cwd, timeout) = if let Some(loaded) = commands.get(name) {
         let cmd = &loaded.command;
-        Some(ResolvedCommand {
-            run: cmd.run.clone(),
-            cwd: cmd.cwd.clone(),
-            timeout: Duration::from_secs(cmd.timeout as u64),
-        })
+        env.extend(cmd.env.clone());
+        (
+            cmd.run.clone(),
+            cmd.cwd.clone(),
+            Duration::from_secs(cmd.timeout as u64),
+        )
     } else {
-        Some(ResolvedCommand {
-            run: name.to_string(),
-            cwd: step.cwd.clone(),
-            timeout: Duration::from_secs(step.timeout as u64),
-        })
+        (
+            name.to_string(),
+            step.cwd.clone(),
+            Duration::from_secs(step.timeout as u64),
+        )
+    };
+    env.extend(step.env.clone());
+    Some(ResolvedCommand {
+        run,
+        cwd,
+        timeout,
+        env,
+    })
+}
+
+/// Renderiza y expande las variables de entorno de un step (`{{...}}` y `$VAR`).
+fn prepare_env(
+    env: &HashMap<String, String>,
+    ctx: &ExecutionContext,
+) -> Result<HashMap<String, String>, ZekError> {
+    let mut resolved = HashMap::new();
+    for (key, value) in env {
+        let rendered = ctx.render(value)?;
+        resolved.insert(key.clone(), expand_env_vars(&rendered));
     }
+    Ok(resolved)
 }
 
 fn resolve_cwd(cwd: Option<&str>, workdir: &Path) -> Option<PathBuf> {
@@ -714,6 +744,7 @@ mod tests {
                     cwd: None,
                     timeout: 300,
                     author: None,
+                    env: HashMap::new(),
                 },
                 source: PathBuf::from("build.yaml"),
             },
@@ -726,6 +757,33 @@ mod tests {
         let status = &report.results.get("build").unwrap().status;
         assert!(status.is_success());
         assert!(status.stdout().contains("compilando"));
+    }
+
+    #[tokio::test]
+    async fn env_se_injecta_en_comando() {
+        let report = run_flow(
+            "name: f\nsteps:\n  - name: a\n    type: command\n    command: echo $MI_VAR\n    env:\n      MI_VAR: hola-env\n",
+        )
+        .await;
+        assert_eq!(report.status, FlowFinalStatus::Success);
+        assert_eq!(
+            report.results.get("a").unwrap().status.stdout().trim(),
+            "hola-env"
+        );
+    }
+
+    #[tokio::test]
+    async fn env_referencia_var_de_proceso() {
+        std::env::set_var("ZEK_ENV_TEST", "secreto");
+        let report = run_flow(
+            "name: f\nsteps:\n  - name: a\n    type: command\n    command: echo $TOKEN\n    env:\n      TOKEN: ${ZEK_ENV_TEST}\n",
+        )
+        .await;
+        assert_eq!(report.status, FlowFinalStatus::Success);
+        assert_eq!(
+            report.results.get("a").unwrap().status.stdout().trim(),
+            "secreto"
+        );
     }
 
     #[cfg(unix)]
