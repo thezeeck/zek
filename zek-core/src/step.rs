@@ -7,13 +7,14 @@ use crate::lang;
 
 pub const DEFAULT_TIMEOUT: u32 = 300;
 
-/// Tipo de step: ejecuta un comando o habla con Claude/OpenCode.
+/// Tipo de step: ejecuta un comando, habla con Claude/OpenCode o invoca otro flujo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StepType {
     Command,
     Claude,
     Opencode,
+    Flow,
 }
 
 /// Qué hacer si un step falla.
@@ -142,6 +143,18 @@ pub struct Step {
     #[serde(default)]
     pub confirm: bool,
 
+    /// Condición para ejecutar el step. Si se evalúa como falsa, se salta.
+    #[serde(default)]
+    pub when: Option<String>,
+
+    /// Solo `type: flow`: nombre del flujo a invocar como subrutina.
+    #[serde(default)]
+    pub flow: Option<String>,
+
+    /// Ejecutar en paralelo con los steps `parallel: true` consecutivos.
+    #[serde(default)]
+    pub parallel: bool,
+
     /// Variables de entorno extra para el step (soporta `$VAR`/`${VAR}` y placeholders).
     #[serde(default)]
     pub env: HashMap<String, String>,
@@ -211,6 +224,14 @@ mod tests {
         assert_eq!(step.prompt.as_deref(), Some("revisa esto"));
         assert_eq!(step.model.as_deref(), Some("anthropic/claude-sonnet-4"));
         assert_eq!(step.agent.as_deref(), Some("build"));
+    }
+
+    #[test]
+    fn parsea_step_flow_y_parallel() {
+        let step = parse_step("name: sub\ntype: flow\nflow: child\nparallel: true\n");
+        assert_eq!(step.step_type, StepType::Flow);
+        assert_eq!(step.flow.as_deref(), Some("child"));
+        assert!(step.parallel);
     }
 
     #[test]

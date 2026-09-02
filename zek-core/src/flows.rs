@@ -127,6 +127,11 @@ impl Flow {
         }
         let main_names: HashSet<String> = self.steps.iter().map(|s| s.name.clone()).collect();
 
+        // Restricciones de steps paralelos.
+        for step in &self.steps {
+            self.validate_parallel_step(step, path, li)?;
+        }
+
         // goto de los steps principales (debe apuntar dentro de `steps`).
         for step in &self.steps {
             self.validate_step_gotos(step, &main_names, path, li)?;
@@ -153,6 +158,7 @@ impl Flow {
             }
             let finally_names: HashSet<String> = fin.steps.iter().map(|s| s.name.clone()).collect();
             for step in &fin.steps {
+                self.validate_parallel_step(step, path, li)?;
                 self.validate_step_gotos(step, &finally_names, path, li)?;
             }
             self.collect_dead_steps(&fin.steps, &mut warnings);
@@ -191,6 +197,53 @@ impl Flow {
             .filter(|name| !commands.contains_key(name))
             .map(|name| crate::t!(val_cmd_ref_missing, name))
             .collect()
+    }
+
+    /// Flujos referenciados por steps `type: flow`.
+    pub fn referenced_flows(&self) -> Vec<String> {
+        let mut refs = Vec::new();
+        let mut collect = |steps: &[Step]| {
+            for s in steps {
+                if s.step_type == StepType::Flow {
+                    if let Some(flow) = &s.flow {
+                        refs.push(flow.clone());
+                    }
+                }
+            }
+        };
+        collect(&self.steps);
+        if let Some(fin) = &self.finally {
+            collect(&fin.steps);
+        }
+        refs
+    }
+
+    /// Advertencias por flujos referenciados que no existen.
+    pub fn validate_flow_refs(&self, flows: &HashMap<String, LoadedFlow>) -> Vec<String> {
+        self.referenced_flows()
+            .into_iter()
+            .filter(|name| !flows.contains_key(name))
+            .map(|name| crate::t!(val_flow_ref_missing, name))
+            .collect()
+    }
+
+    fn validate_parallel_step(
+        &self,
+        step: &Step,
+        path: &Path,
+        li: &LineIndex,
+    ) -> Result<(), ZekError> {
+        if !step.parallel {
+            return Ok(());
+        }
+        if step.on_error.is_some() || step.on_success.is_some() {
+            return Err(ZekError::validation(
+                path,
+                li.line_of(&step.name),
+                crate::t!(val_parallel_action, step.name),
+            ));
+        }
+        Ok(())
     }
 
     fn validate_step_gotos(
@@ -458,6 +511,30 @@ mod tests {
             "name: f\nsteps:\n  - name: build\n    type: command\n    command: build\n  - name: resumen\n    type: claude\n    prompt: x\nfinally:\n  steps:\n    - name: clean\n      type: command\n      command: clean\n",
         );
         assert_eq!(flow.referenced_commands(), vec!["build", "clean"]);
+    }
+
+    #[test]
+    fn referenced_flows_recolecta_todos() {
+        let (flow, _) = validate(
+            "name: f\nsteps:\n  - name: build\n    type: flow\n    flow: build\n  - name: test\n    type: flow\n    flow: test\n",
+        );
+        assert_eq!(flow.referenced_flows(), vec!["build", "test"]);
+    }
+
+    #[test]
+    fn rechaza_parallel_con_on_error() {
+        let err = validate_err(
+            "name: f\nsteps:\n  - name: a\n    type: command\n    command: echo a\n    parallel: true\n    on_error: continue\n",
+        );
+        assert!(err.to_string().contains("parallel"));
+    }
+
+    #[test]
+    fn acepta_parallel_sin_acciones() {
+        let (_, warnings) = validate(
+            "name: f\nsteps:\n  - name: a\n    type: command\n    command: echo a\n    parallel: true\n  - name: b\n    type: command\n    command: echo b\n    parallel: true\n",
+        );
+        assert!(warnings.is_empty());
     }
 
     #[test]

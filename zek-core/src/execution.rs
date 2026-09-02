@@ -5,10 +5,11 @@ use std::time::{Duration, Instant};
 
 use crate::claude::{extract_session_id, ClaudeClient, ClaudeOptions};
 use crate::commands::LoadedCommand;
+use crate::condition;
 use crate::context::{ExecutionContext, SerializedStepResult};
 use crate::error::{FlowFinalStatus, ZekError};
 use crate::exec::{execute_with_retries, CommandExecutor, StepExecutionStatus};
-use crate::flows::Flow;
+use crate::flows::{Flow, LoadedFlow};
 use crate::opencode::{
     extract_session_id as extract_opencode_session_id, OpencodeClient, OpencodeOptions,
 };
@@ -62,6 +63,7 @@ impl FlowReport {
 pub struct FlowRunner<'a> {
     flow: &'a Flow,
     commands: &'a HashMap<String, LoadedCommand>,
+    flows: Option<&'a HashMap<String, LoadedFlow>>,
     workdir: PathBuf,
     stream: bool,
     claude: ClaudeClient,
@@ -116,6 +118,7 @@ impl<'a> FlowRunner<'a> {
         Self {
             flow,
             commands,
+            flows: None,
             workdir,
             stream,
             claude: ClaudeClient::new(),
@@ -126,6 +129,12 @@ impl<'a> FlowRunner<'a> {
             confirm: None,
             args: HashMap::new(),
         }
+    }
+
+    /// Registra el catálogo de flujos (necesario para steps `type: flow`).
+    pub fn with_flows(mut self, flows: &'a HashMap<String, LoadedFlow>) -> Self {
+        self.flows = Some(flows);
+        self
     }
 
     /// Registra un callback de progreso (aviso de inicio/fin de cada step).
@@ -152,14 +161,10 @@ impl<'a> FlowRunner<'a> {
         ctx.set_args(self.args.clone());
         let mut skipped = Vec::new();
 
-        let (mut status, mut exit_reason) = self.run_main(&mut ctx, &mut skipped).await?;
+        let (status, exit_reason) = self
+            .run_flow_internal(self.flow, &mut ctx, &mut skipped)
+            .await?;
         let failed_steps = ctx.failed_step_names();
-        ctx.set_flow_result(status, exit_reason.clone());
-
-        if self.run_finally(&mut ctx, &mut skipped).await? && status == FlowFinalStatus::Success {
-            status = FlowFinalStatus::Failed;
-            exit_reason = "finally".to_string();
-        }
 
         Ok(FlowReport {
             name: self.flow.name.clone(),
@@ -172,24 +177,80 @@ impl<'a> FlowRunner<'a> {
         })
     }
 
-    async fn run_main(
+    /// Ejecuta un flujo (main + finally) registrando sus steps en `ctx`.
+    async fn run_flow_internal(
         &self,
+        flow: &Flow,
         ctx: &mut ExecutionContext,
         skipped: &mut Vec<String>,
     ) -> Result<(FlowFinalStatus, String), ZekError> {
-        let steps = &self.flow.steps;
+        let (outcome, any_failed) = self
+            .run_steps(&flow.steps, ctx, skipped, flow.max_jumps, false)
+            .await?;
+        let (mut status, mut reason) = outcome_to_status(outcome, any_failed, flow.max_jumps);
+        ctx.set_flow_result(status, reason.clone());
+
+        if let Some(fin) = &flow.finally {
+            if !fin.steps.is_empty() {
+                let max_jumps = fin.max_jumps.unwrap_or(DEFAULT_FINALLY_MAX_JUMPS);
+                let (_, fin_failed) = self
+                    .run_steps(&fin.steps, ctx, skipped, max_jumps, true)
+                    .await?;
+                if fin_failed && fin.fail_flow_on_error && status == FlowFinalStatus::Success {
+                    status = FlowFinalStatus::Failed;
+                    reason = "finally".to_string();
+                }
+            }
+        }
+
+        Ok((status, reason))
+    }
+
+    /// Recorre una secuencia de steps (main o `finally`) aplicando condiciones,
+    /// confirmación, `on_error`/`on_success`, `goto` y grupos paralelos.
+    async fn run_steps(
+        &self,
+        steps: &[Step],
+        ctx: &mut ExecutionContext,
+        skipped: &mut Vec<String>,
+        max_jumps: usize,
+        in_finally: bool,
+    ) -> Result<(MainOutcome, bool), ZekError> {
         let total = steps.len();
-        let max_jumps = self.flow.max_jumps;
         let mut idx = 0usize;
         let mut jumps = 0usize;
+        let mut any_failed = false;
 
         let outcome = loop {
             if idx >= steps.len() {
                 break MainOutcome::NaturalEnd;
             }
+
+            if steps[idx].parallel {
+                let start = idx;
+                while idx < steps.len() && steps[idx].parallel {
+                    idx += 1;
+                }
+                let group = &steps[start..idx];
+                if let Some(failed) = self
+                    .run_parallel_group(group, ctx, skipped, start, total)
+                    .await?
+                {
+                    any_failed = true;
+                    break MainOutcome::Stop(failed);
+                }
+                continue;
+            }
+
             let step = &steps[idx];
 
             if step.entry_only_via_goto && !ctx.was_targeted(&step.name) {
+                skipped.push(step.name.clone());
+                idx += 1;
+                continue;
+            }
+
+            if !self.condition_met(step, ctx)? {
                 skipped.push(step.name.clone());
                 idx += 1;
                 continue;
@@ -205,9 +266,11 @@ impl<'a> FlowRunner<'a> {
 
             let result = self.run_step(step, ctx).await?;
             self.emit_finished(&step.name, result.status.clone());
-            let success = result.status.is_success();
+            if !result.status.is_success() {
+                any_failed = true;
+            }
 
-            match next_action(step, success) {
+            match next_action(step, result.status.is_success(), in_finally) {
                 NextAction::Continue => idx += 1,
                 NextAction::End => break MainOutcome::End(step.name.clone()),
                 NextAction::Stop => break MainOutcome::Stop(step.name.clone()),
@@ -232,112 +295,54 @@ impl<'a> FlowRunner<'a> {
             }
         };
 
-        let has_failed = !ctx.failed_step_names().is_empty();
-        let (status, reason) = match outcome {
-            MainOutcome::NaturalEnd => (
-                if has_failed {
-                    FlowFinalStatus::Failed
-                } else {
-                    FlowFinalStatus::Success
-                },
-                "natural_end".to_string(),
-            ),
-            MainOutcome::End(step) => (
-                if has_failed {
-                    FlowFinalStatus::Failed
-                } else {
-                    FlowFinalStatus::Success
-                },
-                format!("end:{step}"),
-            ),
-            MainOutcome::Stop(step) => (FlowFinalStatus::Failed, format!("stop:{step}")),
-            MainOutcome::Aborted => (
-                FlowFinalStatus::Aborted,
-                crate::t!(reason_infinite_loop, max_jumps),
-            ),
-        };
-        Ok((status, reason))
+        Ok((outcome, any_failed))
     }
 
-    async fn run_finally(
+    /// Ejecuta un grupo de steps en paralelo y espera a todos. Devuelve el nombre
+    /// del primer step que falló (para detener el flujo), o `None` si todo ok.
+    async fn run_parallel_group(
         &self,
+        group: &[Step],
         ctx: &mut ExecutionContext,
         skipped: &mut Vec<String>,
-    ) -> Result<bool, ZekError> {
-        let Some(fin) = &self.flow.finally else {
-            return Ok(false);
-        };
-        let steps = &fin.steps;
-        if steps.is_empty() {
-            return Ok(false);
-        }
-
-        let total = steps.len();
-        let max_jumps = fin.max_jumps.unwrap_or(DEFAULT_FINALLY_MAX_JUMPS);
-        let mut idx = 0usize;
-        let mut jumps = 0usize;
-        let mut failed = false;
-
-        loop {
-            if idx >= steps.len() {
-                break;
-            }
-            let step = &steps[idx];
-
+        start: usize,
+        total: usize,
+    ) -> Result<Option<String>, ZekError> {
+        let mut to_run: Vec<&Step> = Vec::new();
+        for step in group {
             if step.entry_only_via_goto && !ctx.was_targeted(&step.name) {
                 skipped.push(step.name.clone());
-                idx += 1;
                 continue;
             }
-
-            self.emit_started(&step.name, idx, total);
-
+            if !self.condition_met(step, ctx)? {
+                skipped.push(step.name.clone());
+                continue;
+            }
             if step.confirm && !self.ask_confirm(&step.name) {
                 skipped.push(step.name.clone());
-                idx += 1;
                 continue;
             }
+            to_run.push(step);
+        }
 
-            let result = self.run_step(step, ctx).await?;
+        for (i, step) in to_run.iter().enumerate() {
+            self.emit_started(&step.name, start + i, total);
+        }
+
+        let futures = to_run.iter().map(|step| self.execute_step(step, ctx));
+        let results = futures::future::join_all(futures).await;
+
+        let mut first_failed = None;
+        for (step, result) in to_run.iter().zip(results) {
+            let result = result?;
+            ctx.record(step.name.clone(), result.clone());
             self.emit_finished(&step.name, result.status.clone());
-            if !result.status.is_success() {
-                failed = true;
-            }
-
-            let action = if result.status.is_success() {
-                match step.effective_on_success() {
-                    OnSuccessAction::Continue => NextAction::Continue,
-                    OnSuccessAction::End => NextAction::End,
-                    OnSuccessAction::Goto(t) => NextAction::Goto(t),
-                }
-            } else {
-                match step.effective_on_error(true) {
-                    OnErrorAction::Continue => NextAction::Continue,
-                    OnErrorAction::Stop => NextAction::End,
-                    OnErrorAction::Goto(t) => NextAction::Goto(t),
-                }
-            };
-
-            match action {
-                NextAction::Continue => idx += 1,
-                NextAction::End | NextAction::Stop => break,
-                NextAction::Goto(target) => {
-                    jumps += 1;
-                    if jumps > max_jumps {
-                        break;
-                    }
-                    match steps.iter().position(|s| s.name == target) {
-                        Some(i) => {
-                            ctx.mark_targeted(&target);
-                            idx = i;
-                        }
-                        None => break,
-                    }
-                }
+            if !result.status.is_success() && first_failed.is_none() {
+                first_failed = Some(step.name.clone());
             }
         }
 
-        Ok(failed && fin.fail_flow_on_error)
+        Ok(first_failed)
     }
 
     fn emit_started(&self, name: &str, index: usize, total: usize) {
@@ -366,24 +371,103 @@ impl<'a> FlowRunner<'a> {
         }
     }
 
+    /// Evalúa la condición `when` del step (si la hay). Devuelve `true` si el
+    /// step debe ejecutarse.
+    fn condition_met(&self, step: &Step, ctx: &ExecutionContext) -> Result<bool, ZekError> {
+        let Some(condition) = &step.when else {
+            return Ok(true);
+        };
+        let rendered = ctx.render(condition)?.trim().to_string();
+        if rendered.is_empty() {
+            return Ok(false);
+        }
+        condition::evaluate(&rendered)
+            .map_err(|e| ZekError::InvalidConfig(crate::t!(err_when_invalid, step.name, e)))
+    }
+
     async fn run_step(
         &self,
         step: &Step,
         ctx: &mut ExecutionContext,
+    ) -> Result<SerializedStepResult, ZekError> {
+        let result = if step.step_type == StepType::Flow {
+            self.run_flow_step(step, ctx).await?
+        } else {
+            self.execute_step(step, ctx).await?
+        };
+        ctx.record(step.name.clone(), result.clone());
+        Ok(result)
+    }
+
+    /// Ejecuta un step sin mutar el contexto (para poder correr en paralelo).
+    async fn execute_step(
+        &self,
+        step: &Step,
+        ctx: &ExecutionContext,
     ) -> Result<SerializedStepResult, ZekError> {
         let start = Instant::now();
         let (status, attempts) = match step.step_type {
             StepType::Command => self.run_command_step(step, ctx).await?,
             StepType::Claude => self.run_claude_step(step, ctx).await?,
             StepType::Opencode => self.run_opencode_step(step, ctx).await?,
+            StepType::Flow => {
+                return Err(ZekError::InvalidConfig(crate::t!(
+                    val_parallel_flow,
+                    step.name
+                )));
+            }
         };
-        let result = SerializedStepResult {
+        Ok(SerializedStepResult {
             status,
             duration: start.elapsed(),
             attempts,
+        })
+    }
+
+    /// Ejecuta un step `type: flow` invocando el flujo referenciado como subrutina.
+    async fn run_flow_step(
+        &self,
+        step: &Step,
+        ctx: &mut ExecutionContext,
+    ) -> Result<SerializedStepResult, ZekError> {
+        let start = Instant::now();
+        let name = step
+            .flow
+            .as_deref()
+            .ok_or_else(|| ZekError::InvalidConfig(crate::t!(val_flow_missing_name, step.name)))?;
+        let flows = self
+            .flows
+            .ok_or_else(|| ZekError::InvalidConfig(crate::t!(val_flow_no_catalog, step.name)))?;
+        let loaded = flows.get(name).ok_or_else(|| {
+            ZekError::InvalidConfig(crate::t!(val_flow_not_found, step.name, name))
+        })?;
+
+        let saved_status = ctx.flow_status;
+        let saved_reason = ctx.exit_reason.clone();
+        let mut sub_skipped = Vec::new();
+        let (status, _reason) =
+            Box::pin(self.run_flow_internal(&loaded.flow, ctx, &mut sub_skipped)).await?;
+        ctx.flow_status = saved_status;
+        ctx.exit_reason = saved_reason;
+
+        let status = match status {
+            FlowFinalStatus::Success => StepExecutionStatus::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            },
+            _ => StepExecutionStatus::Failed {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 1,
+            },
         };
-        ctx.record(step.name.clone(), result.clone());
-        Ok(result)
+
+        Ok(SerializedStepResult {
+            status,
+            duration: start.elapsed(),
+            attempts: 1,
+        })
     }
 
     async fn run_command_step(
@@ -495,7 +579,7 @@ enum NextAction {
     Goto(String),
 }
 
-fn next_action(step: &Step, success: bool) -> NextAction {
+fn next_action(step: &Step, success: bool, in_finally: bool) -> NextAction {
     if success {
         match step.effective_on_success() {
             OnSuccessAction::Continue => NextAction::Continue,
@@ -503,11 +587,41 @@ fn next_action(step: &Step, success: bool) -> NextAction {
             OnSuccessAction::Goto(t) => NextAction::Goto(t),
         }
     } else {
-        match step.effective_on_error(false) {
+        match step.effective_on_error(in_finally) {
             OnErrorAction::Stop => NextAction::Stop,
             OnErrorAction::Continue => NextAction::Continue,
             OnErrorAction::Goto(t) => NextAction::Goto(t),
         }
+    }
+}
+
+fn outcome_to_status(
+    outcome: MainOutcome,
+    any_failed: bool,
+    max_jumps: usize,
+) -> (FlowFinalStatus, String) {
+    match outcome {
+        MainOutcome::NaturalEnd => (
+            if any_failed {
+                FlowFinalStatus::Failed
+            } else {
+                FlowFinalStatus::Success
+            },
+            "natural_end".to_string(),
+        ),
+        MainOutcome::End(step) => (
+            if any_failed {
+                FlowFinalStatus::Failed
+            } else {
+                FlowFinalStatus::Success
+            },
+            format!("end:{step}"),
+        ),
+        MainOutcome::Stop(step) => (FlowFinalStatus::Failed, format!("stop:{step}")),
+        MainOutcome::Aborted => (
+            FlowFinalStatus::Aborted,
+            crate::t!(reason_infinite_loop, max_jumps),
+        ),
     }
 }
 
@@ -783,6 +897,106 @@ mod tests {
         assert_eq!(
             report.results.get("a").unwrap().status.stdout().trim(),
             "secreto"
+        );
+    }
+
+    #[tokio::test]
+    async fn when_falso_salta_el_step() {
+        let report = run_flow(
+            "name: f\nsteps:\n  - name: a\n    type: command\n    command: echo hola\n  - name: b\n    type: command\n    command: echo chau\n    when: \"false\"\n",
+        )
+        .await;
+        assert_eq!(report.status, FlowFinalStatus::Success);
+        assert!(report.results.get("b").is_none());
+        assert_eq!(report.skipped_steps, vec!["b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn when_compara_exit_code() {
+        let report = run_flow(
+            "name: f\nsteps:\n  - name: build\n    type: command\n    command: echo ok\n  - name: solo_si_ok\n    type: command\n    command: echo paso\n    when: \"{{steps.build.exit_code}} == 0\"\n",
+        )
+        .await;
+        assert_eq!(report.status, FlowFinalStatus::Success);
+        assert!(report
+            .results
+            .get("solo_si_ok")
+            .unwrap()
+            .status
+            .is_success());
+    }
+
+    #[tokio::test]
+    async fn when_invalido_da_error() {
+        let flow = Flow::from_str(
+            "name: f\nsteps:\n  - name: a\n    type: command\n    command: echo hola\n    when: \"==\"\n",
+            Path::new("test.yaml"),
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let commands = HashMap::new();
+        let runner = FlowRunner::new(&flow, &commands, tmp.path().to_path_buf(), false);
+        let err = runner.run().await.unwrap_err();
+        assert!(err.to_string().contains("when"));
+    }
+
+    #[tokio::test]
+    async fn parallel_corre_steps_concurrentes() {
+        let report = run_flow(
+            "name: f\nsteps:\n  - name: a\n    type: command\n    command: echo a\n    parallel: true\n  - name: b\n    type: command\n    command: echo b\n    parallel: true\n  - name: c\n    type: command\n    command: echo c\n",
+        )
+        .await;
+        assert_eq!(report.status, FlowFinalStatus::Success);
+        assert!(report.results.get("a").unwrap().status.is_success());
+        assert!(report.results.get("b").unwrap().status.is_success());
+        assert!(report.results.get("c").unwrap().status.is_success());
+    }
+
+    #[tokio::test]
+    async fn parallel_falla_si_alguno_falla() {
+        let report = run_flow(
+            "name: f\nsteps:\n  - name: a\n    type: command\n    command: echo a\n    parallel: true\n  - name: b\n    type: command\n    command: exit 1\n    parallel: true\n  - name: c\n    type: command\n    command: echo no-corre\n",
+        )
+        .await;
+        assert_eq!(report.status, FlowFinalStatus::Failed);
+        assert!(report.results.get("b").unwrap().status.is_failed());
+        assert!(report.results.get("c").is_none());
+    }
+
+    #[tokio::test]
+    async fn flow_step_invoca_otro_flujo() {
+        let flow = Flow::from_str(
+            "name: main\nsteps:\n  - name: sub\n    type: flow\n    flow: child\n  - name: after\n    type: command\n    command: echo hecho\n",
+            Path::new("test.yaml"),
+        )
+        .unwrap();
+        let child = Flow::from_str(
+            "name: child\nsteps:\n  - name: build\n    type: command\n    command: echo compilando\n",
+            Path::new("child.yaml"),
+        )
+        .unwrap();
+        let mut flows = HashMap::new();
+        flows.insert(
+            "child".to_string(),
+            LoadedFlow {
+                flow: child,
+                source: PathBuf::from("child.yaml"),
+                warnings: Vec::new(),
+            },
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let commands = HashMap::new();
+        let runner =
+            FlowRunner::new(&flow, &commands, tmp.path().to_path_buf(), false).with_flows(&flows);
+        let report = runner.run().await.unwrap();
+
+        assert_eq!(report.status, FlowFinalStatus::Success);
+        assert!(report.results.get("sub").unwrap().status.is_success());
+        assert!(report.results.get("after").unwrap().status.is_success());
+        assert_eq!(
+            report.results.get("build").unwrap().status.stdout().trim(),
+            "compilando"
         );
     }
 

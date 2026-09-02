@@ -8,6 +8,7 @@ use crate::error::ZekError;
 use crate::lang::Language;
 
 pub const CONFIG_FILENAME: &str = "config.yaml";
+pub const PROJECT_CONFIG_FILENAME: &str = "zek.yaml";
 pub const COMMANDS_DIR: &str = "commands";
 pub const FLOWS_DIR: &str = "flows";
 
@@ -21,11 +22,51 @@ pub struct Config {
     pub language: Language,
 }
 
+/// Config de proyecto (`zek.yaml`), opcional. Solapa la config global.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectConfig {
+    #[serde(default)]
+    pub workdir: Option<PathBuf>,
+
+    #[serde(default)]
+    pub language: Option<Language>,
+}
+
+impl ProjectConfig {
+    /// Lee y deserializa una config de proyecto desde `path`.
+    pub fn load_from(path: &Path) -> Result<Self, ZekError> {
+        let content = fs::read_to_string(path)?;
+        serde_yaml::from_str(&content).map_err(|e| {
+            let line = e.location().map(|l| l.line()).unwrap_or(0);
+            ZekError::Yaml {
+                path: path.to_path_buf(),
+                line,
+                source: e,
+            }
+        })
+    }
+}
+
 impl Config {
     pub fn new(workdir: PathBuf) -> Self {
         Self {
             workdir,
             language: Language::default(),
+        }
+    }
+
+    /// Aplica una config de proyecto sobre esta config. Los `workdir` relativos
+    /// se resuelven contra `base_dir` (la carpeta que contiene el `zek.yaml`).
+    pub fn apply_project(&mut self, project: ProjectConfig, base_dir: &Path) {
+        if let Some(workdir) = project.workdir {
+            self.workdir = if workdir.is_absolute() {
+                workdir
+            } else {
+                base_dir.join(workdir)
+            };
+        }
+        if let Some(language) = project.language {
+            self.language = language;
         }
     }
 
@@ -108,6 +149,31 @@ impl Config {
     pub fn flows_dir(&self) -> PathBuf {
         self.workdir.join(FLOWS_DIR)
     }
+}
+
+/// Busca un `zek.yaml` desde el directorio actual hacia arriba.
+/// Devuelve la ruta del primero que encuentre (o `None`).
+pub fn find_project_config() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    find_project_config_from(&cwd)
+}
+
+/// Carga la config global y le aplica la config de proyecto (`zek.yaml`) si existe.
+pub fn load_effective() -> Result<Config, ZekError> {
+    let mut config = Config::load()?;
+    if let Some(path) = find_project_config() {
+        let project = ProjectConfig::load_from(&path)?;
+        let base = path.parent().unwrap_or_else(|| Path::new("."));
+        config.apply_project(project, base);
+    }
+    Ok(config)
+}
+
+fn find_project_config_from(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .map(|dir| dir.join(PROJECT_CONFIG_FILENAME))
+        .find(|candidate| candidate.is_file())
 }
 
 /// Carpeta de config de `zek`:
@@ -269,5 +335,61 @@ mod tests {
     fn config_path_termina_en_config_yaml() {
         let path = Config::config_path().unwrap();
         assert_eq!(path.file_name().unwrap(), "config.yaml");
+    }
+
+    #[test]
+    fn apply_project_resuelve_workdir_relativo() {
+        let mut config = Config::new(PathBuf::from("/global"));
+        config.language = Language::Es;
+        let project = ProjectConfig {
+            workdir: Some(PathBuf::from(".")),
+            language: None,
+        };
+        config.apply_project(project, Path::new("/repo"));
+
+        assert_eq!(config.workdir, PathBuf::from("/repo"));
+        assert_eq!(config.language, Language::Es);
+    }
+
+    #[test]
+    fn apply_project_respeta_workdir_absoluto_y_language() {
+        let mut config = Config::new(PathBuf::from("/global"));
+        let project = ProjectConfig {
+            workdir: Some(PathBuf::from("/absoluto")),
+            language: Some(Language::Es),
+        };
+        config.apply_project(project, Path::new("/repo"));
+
+        assert_eq!(config.workdir, PathBuf::from("/absoluto"));
+        assert_eq!(config.language, Language::Es);
+    }
+
+    #[test]
+    fn project_config_parsea() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("zek.yaml");
+        fs::write(&path, "workdir: .\nlanguage: es\n").unwrap();
+
+        let project = ProjectConfig::load_from(&path).unwrap();
+        assert_eq!(project.workdir, Some(PathBuf::from(".")));
+        assert_eq!(project.language, Some(Language::Es));
+    }
+
+    #[test]
+    fn find_project_config_desde_subdirectorio() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let sub = repo.join("a").join("b");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(repo.join("zek.yaml"), "workdir: .\n").unwrap();
+
+        let found = find_project_config_from(&sub).unwrap();
+        assert_eq!(found, repo.join("zek.yaml"));
+    }
+
+    #[test]
+    fn find_project_config_devuelve_none_sin_archivo() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(find_project_config_from(tmp.path()).is_none());
     }
 }

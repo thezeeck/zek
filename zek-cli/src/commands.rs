@@ -11,7 +11,9 @@ use dialoguer::{Confirm, Input};
 
 use zek_core::claude::{ClaudeClient, ClaudeOptions};
 use zek_core::commands::{self as core_commands, LoadedCommand};
-use zek_core::config::{home_dir, Config, COMMANDS_DIR, FLOWS_DIR};
+use zek_core::config::{
+    find_project_config, home_dir, load_effective, Config, COMMANDS_DIR, FLOWS_DIR,
+};
 use zek_core::error::{FlowFinalStatus, ZekError};
 use zek_core::exec::CommandExecutor;
 use zek_core::execution::{FlowReport, FlowRunner, StepProgress};
@@ -20,6 +22,8 @@ use zek_core::lang::{self, Language};
 use zek_core::step::StepType;
 use zek_core::t;
 use zek_core::util::expand_env_vars;
+
+use crate::ReportFormat;
 
 /// `zek init [dir]`: configura zek por primera vez (o re-configura).
 pub fn init(dir: Option<PathBuf>) -> Result<()> {
@@ -46,6 +50,9 @@ pub fn config_show() -> Result<()> {
     let config = ensure_config()?;
 
     println!("{}", t!(label_config, Config::config_path()?.display()));
+    if let Some(project) = find_project_config() {
+        println!("{}", t!(label_project, project.display()));
+    }
     println!("{}", t!(label_workdir, config.workdir.display()));
     println!(
         "  {:<8}: {} ({})",
@@ -62,12 +69,11 @@ pub fn config_show() -> Result<()> {
     Ok(())
 }
 
-/// `zek config set-dir <path>`: cambia la carpeta de trabajo.
+/// `zek config set-dir <path>`: cambia la carpeta de trabajo global.
 pub fn config_set_dir(path: PathBuf) -> Result<()> {
-    ensure_config()?;
+    let mut config = ensure_global_config()?;
 
-    let workdir = expand_tilde(path)?;
-    let config = Config::new(workdir);
+    config.workdir = expand_tilde(path)?;
     config
         .validate()
         .context(lang::messages().err_workdir_invalid)?;
@@ -77,9 +83,9 @@ pub fn config_set_dir(path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// `zek config set-language <en|es>`: cambia el idioma de los mensajes.
+/// `zek config set-language <en|es>`: cambia el idioma global de los mensajes.
 pub fn config_set_language(language: &str) -> Result<()> {
-    let mut config = ensure_config()?;
+    let mut config = ensure_global_config()?;
 
     let lang = Language::parse(language)
         .ok_or_else(|| anyhow::anyhow!(t!(err_language_invalid, language)))?;
@@ -109,6 +115,9 @@ pub fn list() -> Result<()> {
             eprintln!("{}", t!(warning_at, warning, flow.source.display()));
         }
         for warning in flow.flow.validate_command_refs(&commands) {
+            eprintln!("{}", t!(warning_at, warning, flow.source.display()));
+        }
+        for warning in flow.flow.validate_flow_refs(&flows) {
             eprintln!("{}", t!(warning_at, warning, flow.source.display()));
         }
     }
@@ -200,6 +209,7 @@ pub async fn ask(message: &str) -> Result<()> {
 }
 
 /// `zek <nombre> [--clave valor ...]`: ejecuta un flujo o un comando por nombre.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_by_name(
     name: &str,
     args: &[String],
@@ -208,6 +218,7 @@ pub async fn run_by_name(
     debug: bool,
     timeout_global: Option<u64>,
     log: Option<PathBuf>,
+    report: Option<ReportFormat>,
 ) -> Result<i32> {
     let config = ensure_config()?;
     let commands = core_commands::load_all(&config.commands_dir())?;
@@ -218,10 +229,11 @@ pub async fn run_by_name(
         debug,
         timeout_global,
         log,
+        report,
     };
 
     if let Some(loaded) = flows.get(name) {
-        return run_flow(&config, &commands, loaded, args, &opts).await;
+        return run_flow(&config, &commands, &flows, loaded, args, &opts).await;
     }
     if let Some(loaded) = commands.get(name) {
         return run_command(&config, loaded, &opts).await;
@@ -235,11 +247,13 @@ struct RunOptions {
     debug: bool,
     timeout_global: Option<u64>,
     log: Option<PathBuf>,
+    report: Option<ReportFormat>,
 }
 
 async fn run_flow(
     config: &Config,
     commands: &HashMap<String, LoadedCommand>,
+    flows: &HashMap<String, LoadedFlow>,
     loaded: &LoadedFlow,
     args: &[String],
     opts: &RunOptions,
@@ -247,6 +261,9 @@ async fn run_flow(
     let flow = &loaded.flow;
 
     for warning in &loaded.warnings {
+        eprintln!("{}", t!(warning_at, warning, loaded.source.display()));
+    }
+    for warning in flow.validate_flow_refs(flows) {
         eprintln!("{}", t!(warning_at, warning, loaded.source.display()));
     }
 
@@ -261,7 +278,9 @@ async fn run_flow(
     let params = parse_params(args);
 
     let progress_logger = logger.clone();
-    let runner = FlowRunner::new(flow, commands, config.workdir.clone(), true)
+    let stream = opts.report.is_none();
+    let runner = FlowRunner::new(flow, commands, config.workdir.clone(), stream)
+        .with_flows(flows)
         .with_args(params)
         .on_progress(Arc::new(move |p| {
             log_progress(&progress_logger, &p);
@@ -284,7 +303,10 @@ async fn run_flow(
         report.exit_code()
     ));
 
-    print_summary(flow, &report, opts.verbose, opts.debug);
+    match opts.report {
+        Some(format) => print_report(flows, &report, format)?,
+        None => print_summary(flows, &report, opts.verbose, opts.debug),
+    }
     Ok(report.exit_code())
 }
 
@@ -377,17 +399,21 @@ fn print_plan(flow: &Flow) {
                 .prompt
                 .as_deref()
                 .unwrap_or(lang::messages().plan_no_prompt),
+            StepType::Flow => step.flow.as_deref().unwrap_or("?"),
         };
-        let flag = if step.entry_only_via_goto {
-            " [entry_only_via_goto]"
-        } else {
-            ""
-        };
+        let mut flags = String::new();
+        if step.entry_only_via_goto {
+            flags.push_str(" [entry_only_via_goto]");
+        }
+        if step.parallel {
+            flags.push_str(" [parallel]");
+        }
         println!(
-            "  {}. {:<20} {:?}{flag} -> {detail}",
+            "  {}. {:<20} {:?}{} -> {detail}",
             i + 1,
             step.name,
-            step.step_type
+            step.step_type,
+            flags
         );
     }
     if let Some(fin) = &flow.finally {
@@ -402,18 +428,32 @@ fn print_plan(flow: &Flow) {
                     .prompt
                     .as_deref()
                     .unwrap_or(lang::messages().plan_no_prompt),
+                StepType::Flow => step.flow.as_deref().unwrap_or("?"),
             };
+            let mut flags = String::new();
+            if step.entry_only_via_goto {
+                flags.push_str(" [entry_only_via_goto]");
+            }
+            if step.parallel {
+                flags.push_str(" [parallel]");
+            }
             println!(
-                "    {}. {:<20} {:?} -> {detail}",
+                "    {}. {:<20} {:?}{} -> {detail}",
                 i + 1,
                 step.name,
-                step.step_type
+                step.step_type,
+                flags
             );
         }
     }
 }
 
-fn print_summary(flow: &Flow, report: &FlowReport, verbose: bool, debug: bool) {
+fn print_summary(
+    flows: &HashMap<String, LoadedFlow>,
+    report: &FlowReport,
+    verbose: bool,
+    debug: bool,
+) {
     let status_colored = match report.status {
         FlowFinalStatus::Success => report.status.as_str().green().bold(),
         FlowFinalStatus::Failed => report.status.as_str().red().bold(),
@@ -426,25 +466,12 @@ fn print_summary(flow: &Flow, report: &FlowReport, verbose: bool, debug: bool) {
     println!("{}", t!(sum_exit_code, report.exit_code()));
     println!("{}", t!(sum_duration, format_duration(report.duration)));
 
-    let mut types = HashMap::new();
-    for step in &flow.steps {
-        types.insert(step.name.clone(), step.step_type);
-    }
-    if let Some(fin) = &flow.finally {
-        for step in &fin.steps {
-            types.insert(step.name.clone(), step.step_type);
-        }
-    }
+    let types = step_types(flows);
 
     println!();
     println!("{}", lang::messages().sum_steps);
     for (name, result) in report.results.ordered_results() {
-        let type_str = match types.get(&name) {
-            Some(StepType::Command) => "command",
-            Some(StepType::Claude) => "claude",
-            Some(StepType::Opencode) => "opencode",
-            None => "?",
-        };
+        let type_str = type_str(types.get(&name));
         let marker = if result.status.is_success() {
             "✓".green()
         } else {
@@ -484,6 +511,142 @@ fn print_summary(flow: &Flow, report: &FlowReport, verbose: bool, debug: bool) {
             }
         }
     }
+}
+
+fn step_types(flows: &HashMap<String, LoadedFlow>) -> HashMap<String, StepType> {
+    let mut types = HashMap::new();
+    for loaded in flows.values() {
+        for step in &loaded.flow.steps {
+            types.insert(step.name.clone(), step.step_type);
+        }
+        if let Some(fin) = &loaded.flow.finally {
+            for step in &fin.steps {
+                types.insert(step.name.clone(), step.step_type);
+            }
+        }
+    }
+    types
+}
+
+fn type_str(step_type: Option<&StepType>) -> &'static str {
+    match step_type {
+        Some(StepType::Command) => "command",
+        Some(StepType::Claude) => "claude",
+        Some(StepType::Opencode) => "opencode",
+        Some(StepType::Flow) => "flow",
+        None => "?",
+    }
+}
+
+fn print_report(
+    flows: &HashMap<String, LoadedFlow>,
+    report: &FlowReport,
+    format: ReportFormat,
+) -> Result<()> {
+    match format {
+        ReportFormat::Json => {
+            let value = report_json(flows, report);
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        ReportFormat::Markdown => {
+            print!("{}", report_markdown(flows, report));
+        }
+    }
+    Ok(())
+}
+
+fn report_json(flows: &HashMap<String, LoadedFlow>, report: &FlowReport) -> serde_json::Value {
+    let types = step_types(flows);
+    let steps: Vec<serde_json::Value> = report
+        .results
+        .ordered_results()
+        .into_iter()
+        .map(|(name, result)| {
+            serde_json::json!({
+                "name": name,
+                "type": type_str(types.get(&name)),
+                "status": result.status.status_str(),
+                "exit_code": result.status.exit_code(),
+                "attempts": result.attempts,
+                "duration_ms": result.duration.as_millis(),
+                "stdout": result.status.stdout(),
+                "stderr": result.status.stderr(),
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "name": report.name,
+        "status": report.status.as_str(),
+        "exit_code": report.exit_code(),
+        "duration_ms": report.duration.as_millis(),
+        "exit_reason": report.exit_reason,
+        "failed_steps": report.failed_steps,
+        "skipped_steps": report.skipped_steps,
+        "steps": steps,
+    })
+}
+
+fn report_markdown(flows: &HashMap<String, LoadedFlow>, report: &FlowReport) -> String {
+    let types = step_types(flows);
+    let mut out = String::new();
+
+    out.push_str(&format!("# Flow: {}\n\n", report.name));
+    out.push_str(&format!("- **Status**: {}\n", report.status.as_str()));
+    out.push_str(&format!("- **Exit code**: {}\n", report.exit_code()));
+    out.push_str(&format!(
+        "- **Duration**: {}\n",
+        format_duration(report.duration)
+    ));
+    out.push_str(&format!("- **Exit reason**: {}\n", report.exit_reason));
+
+    if !report.failed_steps.is_empty() {
+        out.push_str(&format!(
+            "- **Failed steps**: {}\n",
+            report.failed_steps.join(", ")
+        ));
+    }
+    if !report.skipped_steps.is_empty() {
+        out.push_str(&format!(
+            "- **Skipped steps**: {}\n",
+            report.skipped_steps.join(", ")
+        ));
+    }
+
+    out.push_str("\n## Steps\n\n");
+    out.push_str("| Step | Type | Status | Exit code | Attempts | Duration |\n");
+    out.push_str("|------|------|--------|-----------|----------|----------|\n");
+    for (name, result) in report.results.ordered_results() {
+        let exit_code = result
+            .status
+            .exit_code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        out.push_str(&format!(
+            "| {name} | {} | {} | {exit_code} | {} | {} |\n",
+            type_str(types.get(&name)),
+            result.status.status_str(),
+            result.attempts,
+            format_duration(result.duration)
+        ));
+    }
+    for name in &report.skipped_steps {
+        out.push_str(&format!("| {name} | - | skipped | - | - | - |\n"));
+    }
+
+    for (name, result) in report.results.ordered_results() {
+        if !result.status.is_success() {
+            out.push_str(&format!("\n## Output: {name}\n\n"));
+            if !result.status.stdout().trim().is_empty() {
+                out.push_str(&format!("```\n{}\n```\n", result.status.stdout()));
+            }
+            if !result.status.stderr().trim().is_empty() {
+                out.push_str(&format!("```\n{}\n```\n", result.status.stderr()));
+            }
+        }
+    }
+
+    out
 }
 
 fn format_duration(d: Duration) -> String {
@@ -581,9 +744,22 @@ fn status(path: &Path) -> &'static str {
     }
 }
 
-/// Carga la config; si no existe, dispara el wizard de init automáticamente.
-fn ensure_config() -> Result<Config> {
+/// Carga la config global; si no existe, dispara el wizard de init.
+fn ensure_global_config() -> Result<Config> {
     match Config::load() {
+        Ok(config) => Ok(config),
+        Err(ZekError::ConfigNotFound(_)) => {
+            println!("{}\n", lang::messages().msg_no_config);
+            init(None)?;
+            Config::load().context(lang::messages().err_config_after_init)
+        }
+        Err(e) => Err(e).context(lang::messages().err_config_load),
+    }
+}
+
+/// Carga la config efectiva (global + `zek.yaml` del proyecto) y fija el idioma.
+fn ensure_config() -> Result<Config> {
+    match load_effective() {
         Ok(config) => {
             lang::set(config.language);
             Ok(config)
@@ -591,7 +767,7 @@ fn ensure_config() -> Result<Config> {
         Err(ZekError::ConfigNotFound(_)) => {
             println!("{}\n", lang::messages().msg_no_config);
             init(None)?;
-            Config::load().context(lang::messages().err_config_after_init)
+            load_effective().context(lang::messages().err_config_after_init)
         }
         Err(e) => Err(e).context(lang::messages().err_config_load),
     }

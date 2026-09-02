@@ -75,6 +75,12 @@ pub struct Messages {
     pub val_on_success_invalid: &'static str,
     pub val_goto_empty: &'static str,
     pub val_step_no_command: &'static str,
+    pub val_flow_missing_name: &'static str,
+    pub val_flow_no_catalog: &'static str,
+    pub val_flow_not_found: &'static str,
+    pub val_parallel_flow: &'static str,
+    pub val_flow_ref_missing: &'static str,
+    pub val_parallel_action: &'static str,
 
     // Razones de salida de ejecución.
     pub reason_infinite_loop: &'static str,
@@ -114,6 +120,7 @@ pub struct Messages {
     pub prompt_create_subdir: &'static str,
     pub label_config: &'static str,
     pub label_workdir: &'static str,
+    pub label_project: &'static str,
     pub status_ok: &'static str,
     pub status_missing: &'static str,
     pub msg_configured: &'static str,
@@ -155,6 +162,7 @@ pub struct Messages {
     pub msg_language_updated: &'static str,
     pub err_language_invalid: &'static str,
     pub err_log_open: &'static str,
+    pub err_when_invalid: &'static str,
 }
 
 pub const EN: Messages = Messages {
@@ -186,6 +194,12 @@ pub const EN: Messages = Messages {
     val_on_success_invalid: "invalid on_success: '{}' (expected: continue | end | goto:<step>)",
     val_goto_empty: "goto: requires a non-empty step name",
     val_step_no_command: "step '{}' of type command has no command defined",
+    val_flow_missing_name: "flow step '{}' has no flow name",
+    val_flow_no_catalog: "flow step '{}' requires loaded flows",
+    val_flow_not_found: "flow step '{}' references unknown flow '{}'",
+    val_parallel_flow: "flow step '{}' cannot run in parallel",
+    val_flow_ref_missing: "step references flow '{}' which does not exist",
+    val_parallel_action: "parallel step '{}' cannot set on_error/on_success",
 
     reason_infinite_loop: "infinite_loop: exceeded {} jumps",
 
@@ -222,6 +236,7 @@ pub const EN: Messages = Messages {
     prompt_create_subdir: "Create the {} folder?",
     label_config: "Config : {}",
     label_workdir: "Workdir: {}",
+    label_project: "Project: {}",
     status_ok: "ok",
     status_missing: "missing",
     msg_configured: "zek is configured. Run `zek --help` to see the commands.",
@@ -264,6 +279,7 @@ pub const EN: Messages = Messages {
     msg_language_updated: "Language updated: {}",
     err_language_invalid: "invalid language '{}' (expected: en | es)",
     err_log_open: "could not open log file: {}",
+    err_when_invalid: "invalid `when` condition in step '{}': {}",
 };
 
 pub const ES: Messages = Messages {
@@ -296,6 +312,12 @@ pub const ES: Messages = Messages {
     val_on_success_invalid: "on_success inválido: '{}' (esperado: continue | end | goto:<step>)",
     val_goto_empty: "goto: requiere un nombre de step no vacío",
     val_step_no_command: "el step '{}' de tipo command no tiene comando definido",
+    val_flow_missing_name: "el step flow '{}' no tiene nombre de flujo",
+    val_flow_no_catalog: "el step flow '{}' requiere flujos cargados",
+    val_flow_not_found: "el step flow '{}' referencia un flujo inexistente '{}'",
+    val_parallel_flow: "el step flow '{}' no puede correr en paralelo",
+    val_flow_ref_missing: "el step referencia el flujo '{}' que no existe",
+    val_parallel_action: "el step paralelo '{}' no puede definir on_error/on_success",
 
     reason_infinite_loop: "infinite_loop: se superaron {} saltos",
 
@@ -332,6 +354,7 @@ pub const ES: Messages = Messages {
     prompt_create_subdir: "Crear la carpeta {}?",
     label_config: "Config : {}",
     label_workdir: "Workdir: {}",
+    label_project: "Proyecto: {}",
     status_ok: "ok",
     status_missing: "missing",
     msg_configured: "zek está configurado. Usá `zek --help` para ver los comandos.",
@@ -374,6 +397,7 @@ pub const ES: Messages = Messages {
     msg_language_updated: "Idioma actualizado: {}",
     err_language_invalid: "idioma inválido '{}' (esperado: en | es)",
     err_log_open: "no se pudo abrir el archivo de log: {}",
+    err_when_invalid: "condición `when` inválida en el step '{}': {}",
 };
 
 /// Devuelve el catálogo de mensajes para el idioma actual.

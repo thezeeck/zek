@@ -34,8 +34,18 @@ struct Cli {
     #[arg(long, global = true)]
     log: Option<PathBuf>,
 
+    /// Export a report (json|markdown) instead of the summary
+    #[arg(long, global = true, value_enum)]
+    report: Option<ReportFormat>,
+
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ReportFormat {
+    Json,
+    Markdown,
 }
 
 #[derive(Subcommand)]
@@ -165,6 +175,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 cli.debug,
                 cli.timeout_global,
                 cli.log,
+                cli.report,
             )
             .await
         }

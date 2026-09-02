@@ -2,6 +2,7 @@
 
 pub mod claude;
 pub mod commands;
+pub mod condition;
 pub mod config;
 pub mod context;
 pub mod error;

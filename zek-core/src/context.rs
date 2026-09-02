@@ -109,6 +109,8 @@ impl ExecutionContext {
                 name.clone(),
                 json!({
                     "status": result.status.status_str(),
+                    "success": result.status.is_success(),
+                    "failed": result.status.is_failed(),
                     "stdout": result.status.stdout(),
                     "stderr": result.status.stderr(),
                     "exit_code": result.status.exit_code(),

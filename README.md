@@ -57,6 +57,23 @@ workdir: /ruta/a/mi-proyecto
 language: es
 ```
 
+### Config por proyecto (`zek.yaml`)
+
+Además de la config global, `zek` busca un archivo `zek.yaml` en el directorio
+actual (y sus padres). Si lo encuentra, solapa la config global: permite definir
+`workdir` y `language` por repositorio. Los `workdir` relativos se resuelven
+contra la carpeta que contiene el `zek.yaml`.
+
+```yaml
+# <repo>/zek.yaml
+workdir: .            # usar commands/ y flows/ del propio repo
+language: en
+```
+
+```bash
+cd <repo> && zek list   # usa <repo>/commands y <repo>/flows
+```
+
 ## Estructura de carpetas
 
 ```
@@ -129,19 +146,23 @@ finally:
 | `command` | Ejecuta un comando (nombrado desde `commands/` o crudo) |
 | `claude` | Envía un prompt a `claude -p` |
 | `opencode` | Envía un prompt a `opencode run` |
+| `flow` | Invoca otro flujo como subrutina |
 
 ### Campos de un step
 
 | Campo | Tipo | Default | Descripción |
 |-------|------|---------|-------------|
 | `name` | string | obligatorio | Nombre único dentro del flujo |
-| `type` | enum | obligatorio | `command`, `claude` u `opencode` |
+| `type` | enum | obligatorio | `command`, `claude`, `opencode` o `flow` |
 | `retries` | u32 | 0 | Reintentos antes de considerar el step fallido |
 | `retry_delay` | u32 | 0 | Segundos entre reintentos |
 | `on_error` | enum | `stop` | `stop`, `continue` o `goto:<name>` |
 | `on_success` | enum | `continue` | `continue`, `end` o `goto:<name>` |
 | `entry_only_via_goto` | bool | false | Solo se ejecuta si otro step lo referencia con `goto` |
 | `confirm` | bool | false | Pide confirmación antes de ejecutar |
+| `when` | string | - | Condición para ejecutar el step (si es falsa, se salta) |
+| `parallel` | bool | false | Corre en paralelo con los steps `parallel: true` consecutivos |
+| `flow` | string | - | Solo `flow`: nombre del flujo a invocar |
 | `command` | string | - | Solo `command`: comando a ejecutar |
 | `cwd` | string | - | Solo `command` |
 | `timeout` | u32 | 300 | Timeout en segundos |
@@ -160,6 +181,28 @@ disponibles `{{steps.<name>.<campo>}}` (con `status`, `stdout`, `stderr`,
 `exit_code`, `attempts`), `{{args.<clave>}}` (argumentos pasados por CLI) y,
 dentro de `finally`, `{{flow.<campo>}}` (con `status`, `failed_steps` y
 `exit_reason`). Las variables faltantes se resuelven a cadena vacía.
+
+### Condicionales (`when`)
+
+Un step puede llevar un campo `when` con una condición. Si se evalúa como falsa
+(o queda vacía), el step se salta. La condición se renderiza primero con
+Handlebars y luego se evalúa como expresión booleana: soporta comparaciones
+(`==`, `!=`, `<`, `<=`, `>`, `>=`), lógica (`&&`, `||`, `!`) y paréntesis.
+
+```yaml
+steps:
+  - name: build
+    type: command
+    command: cargo build
+
+  - name: diagnosticar
+    type: claude
+    when: "{{steps.build.failed}}"
+    prompt: "El build falló: {{steps.build.stderr}}"
+```
+
+Valores falsos: cadena vacía, `false`, `no`, `0`. Todo lo demás es verdadero.
+Los placeholders exponen `{{steps.<name>.success}}` y `{{steps.<name>.failed}}`.
 
 ### Variables de entorno y secretos
 
@@ -180,6 +223,54 @@ steps:
 
 ```bash
 DEPLOY_TOKEN=secret zek deploy
+```
+
+### Composición de flujos (`type: flow`)
+
+Un step `type: flow` invoca otro flujo como subrutina. Sus steps se registran en
+el mismo contexto, así que podés referenciar sus resultados con
+`{{steps.<name>.<campo>}}`:
+
+```yaml
+# flows/ci.yaml
+name: ci
+steps:
+  - name: build
+    type: flow
+    flow: build
+  - name: test
+    type: flow
+    flow: test
+```
+
+```yaml
+# flows/build.yaml
+name: build
+steps:
+  - name: compile
+    type: command
+    command: cargo build
+```
+
+### Steps en paralelo
+
+Los steps consecutivos con `parallel: true` corren a la vez y el flujo espera a
+todos antes de continuar. Si alguno falla, el flujo se detiene. Los steps en
+paralelo no pueden definir `on_error` ni `on_success`.
+
+```yaml
+steps:
+  - name: lint
+    type: command
+    command: cargo clippy
+    parallel: true
+  - name: typecheck
+    type: command
+    command: cargo check
+    parallel: true
+  - name: deploy
+    type: command
+    command: ./deploy.sh
 ```
 
 ### Argumentos por CLI
@@ -218,8 +309,10 @@ zek <flujo> --clave valor   # argumentos accesibles como {{args.clave}}
 ```
 
 Flags globales: `--dry-run`, `--verbose/-v`, `--debug`, `--timeout-global <seg>`,
-`--log <archivo>` (guarda un log de la ejecución). Los flags globales van antes
-del nombre del flujo/comando: `zek --log run.log deploy`.
+`--log <archivo>` (guarda un log de la ejecución) y `--report <json|markdown>`
+(exporta un reporte a stdout en vez del resumen). Los flags globales van antes
+del nombre del flujo/comando: `zek --log run.log deploy` o
+`zek --report json deploy > report.json`.
 
 Exit codes: `0` success, `2` failed, `3` aborted (loop infinito).
 
