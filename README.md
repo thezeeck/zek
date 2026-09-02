@@ -1,93 +1,83 @@
 # zek
 
-Orquestador de flujos de comandos para la terminal, escrito en Rust. Ejecuta
-comandos definidos en YAML, los encadena en flujos con reintentos y manejo de
-errores, y se integra con **Claude** (`claude -p`) y **OpenCode** (`opencode run`)
-para pasos de diagnóstico y resúmenes.
+Command flow orchestrator for the terminal, written in Rust. Executes commands defined in YAML, chains them into flows with retries and error handling, and integrates with **Claude** (`claude -p`) and **OpenCode** (`opencode run`) for diagnostic steps and summaries.
 
-## Instalación
+## Installation
 
 ```bash
-# Desde crates.io
+# From crates.io
 cargo install zek-cli
 
-# O desde el código fuente
+# Or from source code
 git clone https://github.com/thezeeck/zek
 cd zek
-./scripts/install.sh          # build release + copia a ~/.local/bin
+./scripts/install.sh          # build release + copy to ~/.local/bin
 ```
 
-También hay binarios precompilados para Linux, macOS y Windows en las
-[releases de GitHub](https://github.com/thezeeck/zek/releases), e installers
-`shell`/`powershell`/`npm` generados con cargo-dist.
+Pre-built binaries for Linux, macOS, and Windows are also available on [GitHub Releases](https://github.com/thezeeck/zek/releases), along with `shell`/`powershell`/`npm` installers generated with cargo-dist.
 
 ### Shell completions
 
 ```bash
-zek completion --shell bash  # también: zsh, fish, powershell, elvish
+zek completion --shell bash  # also: zsh, fish, powershell, elvish
 ```
 
-## Primeros pasos
+## Getting Started
 
 ```bash
-# Configura tu carpeta de trabajo (contendrá commands/ y flows/)
-zek init ~/mis-proyectos
+# Set up your working directory (will contain commands/ and flows/)
+zek init ~/my-projects
 
-# Lista comandos y flujos disponibles
+# List available commands and flows
 zek list
 
-# Ejecuta un flujo
+# Run a flow
 zek deploy
 
-# Ejecuta un comando directamente
+# Run a command directly
 zek build
 
-# Pregunta algo a Claude fuera de flujos
-zek ask "¿Cómo optimizo este código?"
+# Ask Claude something outside of flows
+zek ask "How do I optimize this code?"
 ```
 
-La configuración se guarda en `~/.config/zek/config.yaml`
-(o `$XDG_CONFIG_HOME/zek`, `%APPDATA%\zek` en Windows).
+The configuration is saved in `~/.config/zek/config.yaml` (or `$XDG_CONFIG_HOME/zek`, `%APPDATA%\zek` on Windows).
 
-El idioma de los mensajes se configura con la clave `language` (valores
-`en`/`es`, por defecto `en`):
+The message language is configured using the `language` key (`en`/`es` values, default is `en`):
 
 ```yaml
-workdir: /ruta/a/mi-proyecto
+workdir: /path/to/my-project
 language: es
 ```
 
-### Config por proyecto (`zek.yaml`)
+### Per-project configuration (`zek.yaml`)
 
-Además de la config global, `zek` busca un archivo `zek.yaml` en el directorio
-actual (y sus padres). Si lo encuentra, solapa la config global: permite definir
-`workdir` y `language` por repositorio. Los `workdir` relativos se resuelven
-contra la carpeta que contiene el `zek.yaml`.
+In addition to global config, `zek` looks for a `zek.yaml` file in the current directory (and its parent directories). If found, it overrides the global config, allowing you to define `workdir` and `language` per repository. Relative `workdir` paths are resolved against the directory containing `zek.yaml`.
 
 ```yaml
 # <repo>/zek.yaml
-workdir: .            # usar commands/ y flows/ del propio repo
+workdir: .            # use commands/ and flows/ from the repo itself
 language: en
 ```
 
 ```bash
-cd <repo> && zek list   # usa <repo>/commands y <repo>/flows
+cd <repo> && zek list   # uses <repo>/commands and <repo>/flows
 ```
 
-## Estructura de carpetas
+## Directory Structure
 
 ```
 ~/.config/zek/config.yaml
 <workdir>/
-├── commands/*.yaml   # Comandos reutilizables
-└── flows/*.yaml      # Flujos que encadenan comandos + pasos de IA
+├── commands/*.yaml   # Reusable commands
+└── flows/*.yaml      # Flows chaining commands + AI steps
 ```
 
-## Comandos (`commands/*.yaml`)
+## Commands (`commands/*.yaml`)
 
 ```yaml
 name: build
-description: "Compila el proyecto"
+description: "Compiles the project"
 run: "cargo build --release"
 cwd: "."
 timeout: 300
@@ -95,25 +85,25 @@ env:
   RUST_BACKTRACE: "1"
 ```
 
-## Flujos (`flows/*.yaml`)
+## Flows (`flows/*.yaml`)
 
 ```yaml
 name: deploy
-description: "Build, test y resumen con OpenCode"
+description: "Build, test, and summary with OpenCode"
 steps:
   - name: build
     type: command
     command: build
     retries: 2
     retry_delay: 5
-    on_error: goto:diagnosticar_falla
+    on_error: goto:diagnose_failure
 
-  - name: diagnosticar_falla
+  - name: diagnose_failure
     type: opencode
     entry_only_via_goto: true
     prompt: >
-      El build falló con este error: {{steps.build.stderr}}.
-      ¿Cuál es la causa raíz probable?
+      The build failed with this error: {{steps.build.stderr}}.
+      What is the probable root cause?
     on_success: end
 
   - name: test
@@ -122,10 +112,10 @@ steps:
     retries: 1
     on_error: continue
 
-  - name: resumen
+  - name: summary
     type: opencode
     prompt: >
-      Resumí el resultado del flujo:
+      Summarize the flow result:
       - build={{steps.build.status}} ({{steps.build.exit_code}})
       - test={{steps.test.status}} ({{steps.test.exit_code}})
     on_success: end
@@ -139,55 +129,48 @@ finally:
       on_error: continue
 ```
 
-### Tipos de step
+### Step types
 
-| Tipo | Descripción |
+| Type | Description |
 |------|-------------|
-| `command` | Ejecuta un comando (nombrado desde `commands/` o crudo) |
-| `claude` | Envía un prompt a `claude -p` |
-| `opencode` | Envía un prompt a `opencode run` |
-| `flow` | Invoca otro flujo como subrutina |
+| `command` | Executes a command (named from `commands/` or raw) |
+| `claude` | Sends a prompt to `claude -p` |
+| `opencode` | Sends a prompt to `opencode run` |
+| `flow` | Invokes another flow as a subroutine |
 
-### Campos de un step
+### Step fields
 
-| Campo | Tipo | Default | Descripción |
+| Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `name` | string | obligatorio | Nombre único dentro del flujo |
-| `type` | enum | obligatorio | `command`, `claude`, `opencode` o `flow` |
-| `retries` | u32 | 0 | Reintentos antes de considerar el step fallido |
-| `retry_delay` | u32 | 0 | Segundos entre reintentos |
-| `on_error` | enum | `stop` | `stop`, `continue` o `goto:<name>` |
-| `on_success` | enum | `continue` | `continue`, `end` o `goto:<name>` |
-| `entry_only_via_goto` | bool | false | Solo se ejecuta si otro step lo referencia con `goto` |
-| `confirm` | bool | false | Pide confirmación antes de ejecutar |
-| `when` | string | - | Condición para ejecutar el step (si es falsa, se salta) |
-| `parallel` | bool | false | Corre en paralelo con los steps `parallel: true` consecutivos |
-| `flow` | string | - | Solo `flow`: nombre del flujo a invocar |
-| `command` | string | - | Solo `command`: comando a ejecutar |
-| `cwd` | string | - | Solo `command` |
-| `timeout` | u32 | 300 | Timeout en segundos |
-| `prompt` | string | - | Solo `claude`/`opencode`: prompt con placeholders |
-| `output_format` | string | - | Solo `claude`/`opencode`: `json` para parseo |
-| `session_id` | string | - | Solo `claude`/`opencode`: ID de sesión previa |
-| `continue_session` | bool | false | Solo `claude`/`opencode`: continuar la sesión anterior |
-| `model` | string | - | Solo `opencode`: modelo (`provider/model`) |
-| `agent` | string | - | Solo `opencode`: agente |
-| `env` | map | - | Variables de entorno extra para el step |
+| `name` | string | required | Unique name within the flow |
+| `type` | enum | required | `command`, `claude`, `opencode`, or `flow` |
+| `retries` | u32 | 0 | Retry attempts before considering the step failed |
+| `retry_delay` | u32 | 0 | Seconds between retries |
+| `on_error` | enum | `stop` | `stop`, `continue`, or `goto:<name>` |
+| `on_success` | enum | `continue` | `continue`, `end`, or `goto:<name>` |
+| `entry_only_via_goto` | bool | false | Only executes if another step targets it via `goto` |
+| `confirm` | bool | false | Asks for confirmation before executing |
+| `when` | string | - | Condition to execute the step (skipped if false) |
+| `parallel` | bool | false | Runs in parallel with consecutive `parallel: true` steps |
+| `flow` | string | - | Only `flow`: name of the flow to invoke |
+| `command` | string | - | Only `command`: command to run |
+| `cwd` | string | - | Only `command` |
+| `timeout` | u32 | 300 | Timeout in seconds |
+| `prompt` | string | - | Only `claude`/`opencode`: prompt with placeholders |
+| `output_format` | string | - | Only `claude`/`opencode`: `json` for parsing |
+| `session_id` | string | - | Only `claude`/`opencode`: previous session ID |
+| `continue_session` | bool | false | Only `claude`/`opencode`: continue previous session |
+| `model` | string | - | Only `opencode`: model (`provider/model`) |
+| `agent` | string | - | Only `opencode`: agent |
+| `env` | map | - | Extra environment variables for the step |
 
 ### Templating
 
-Los prompts y comandos usan [Handlebars](https://handlebarsjs.com/). Están
-disponibles `{{steps.<name>.<campo>}}` (con `status`, `stdout`, `stderr`,
-`exit_code`, `attempts`), `{{args.<clave>}}` (argumentos pasados por CLI) y,
-dentro de `finally`, `{{flow.<campo>}}` (con `status`, `failed_steps` y
-`exit_reason`). Las variables faltantes se resuelven a cadena vacía.
+Prompts and commands use [Handlebars](https://handlebarsjs.com/). Available placeholders include `{{steps.<name>.<field>}}` (with `status`, `stdout`, `stderr`, `exit_code`, `attempts`), `{{args.<key>}}` (arguments passed via CLI), and, inside `finally`, `{{flow.<field>}}` (with `status`, `failed_steps`, and `exit_reason`). Missing variables resolve to an empty string.
 
-### Condicionales (`when`)
+### Conditionals (`when`)
 
-Un step puede llevar un campo `when` con una condición. Si se evalúa como falsa
-(o queda vacía), el step se salta. La condición se renderiza primero con
-Handlebars y luego se evalúa como expresión booleana: soporta comparaciones
-(`==`, `!=`, `<`, `<=`, `>`, `>=`), lógica (`&&`, `||`, `!`) y paréntesis.
+A step can include a `when` field with a condition. If it evaluates to false (or is empty), the step is skipped. The condition is rendered first with Handlebars and then evaluated as a boolean expression, supporting comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`), logic (`&&`, `||`, `!`), and parentheses.
 
 ```yaml
 steps:
@@ -195,21 +178,17 @@ steps:
     type: command
     command: cargo build
 
-  - name: diagnosticar
+  - name: diagnose
     type: claude
     when: "{{steps.build.failed}}"
-    prompt: "El build falló: {{steps.build.stderr}}"
+    prompt: "The build failed: {{steps.build.stderr}}"
 ```
 
-Valores falsos: cadena vacía, `false`, `no`, `0`. Todo lo demás es verdadero.
-Los placeholders exponen `{{steps.<name>.success}}` y `{{steps.<name>.failed}}`.
+False values: empty string, `false`, `no`, `0`. Everything else is true. Placeholders expose `{{steps.<name>.success}}` and `{{steps.<name>.failed}}`.
 
-### Variables de entorno y secretos
+### Environment Variables and Secrets
 
-Los `steps` y `commands` pueden definir un mapa `env` con variables de entorno
-adicionales. Los valores admiten placeholders (`{{args.<clave>}}`, etc.) y
-referencias a variables del proceso (`$VAR` o `${VAR}`), lo que permite pasar
-secretos sin hardcodearlos en el YAML:
+`steps` and `commands` can define an `env` map containing additional environment variables. Values accept placeholders (`{{args.<key>}}`, etc.) and process environment variable references (`$VAR` or `${VAR}`), enabling secrets to be passed without hardcoding them into YAML:
 
 ```yaml
 steps:
@@ -217,7 +196,7 @@ steps:
     type: command
     command: ./deploy.sh
     env:
-      DEPLOY_TOKEN: "${DEPLOY_TOKEN}"   # viene del entorno del proceso
+      DEPLOY_TOKEN: "${DEPLOY_TOKEN}"   # retrieved from process environment
       ENV: staging
 ```
 
@@ -225,11 +204,9 @@ steps:
 DEPLOY_TOKEN=secret zek deploy
 ```
 
-### Composición de flujos (`type: flow`)
+### Flow Composition (`type: flow`)
 
-Un step `type: flow` invoca otro flujo como subrutina. Sus steps se registran en
-el mismo contexto, así que podés referenciar sus resultados con
-`{{steps.<name>.<campo>}}`:
+A `type: flow` step invokes another flow as a subroutine. Its steps are registered in the same context, allowing you to reference their results using `{{steps.<name>.<field>}}`:
 
 ```yaml
 # flows/ci.yaml
@@ -252,11 +229,9 @@ steps:
     command: cargo build
 ```
 
-### Steps en paralelo
+### Parallel Steps
 
-Los steps consecutivos con `parallel: true` corren a la vez y el flujo espera a
-todos antes de continuar. Si alguno falla, el flujo se detiene. Los steps en
-paralelo no pueden definir `on_error` ni `on_success`.
+Consecutive steps marked with `parallel: true` run simultaneously, and the flow waits for all of them to complete before moving forward. If any step fails, the flow stops. Parallel steps cannot define `on_error` or `on_success`.
 
 ```yaml
 steps:
@@ -273,13 +248,12 @@ steps:
     command: ./deploy.sh
 ```
 
-### Argumentos por CLI
+### CLI Arguments
 
-Podés pasar parámetros a un flujo con `--clave valor` (o `--clave=valor`) y
-referenciarlos en el YAML como `{{args.<clave>}}`:
+Parameters can be passed to a flow using `--key value` (or `--key=value`) and referenced inside the YAML as `{{args.<key>}}`:
 
 ```bash
-zek feature --branch mi-rama
+zek feature --branch my-branch
 ```
 
 ```yaml
@@ -293,30 +267,26 @@ steps:
     command: git checkout -b "{{args.branch}}"
 ```
 
-## Referencia de CLI
+## CLI Reference
 
 ```bash
-zek init [dir]              # configura por primera vez (o re-configura)
-zek config show             # muestra la config actual
-zek config set-dir <path>   # cambia la carpeta de trabajo
-zek config set-language <lang>  # cambia el idioma (en | es, default en)
-zek list                    # comandos y flujos
-zek commands <nombre>       # muestra un comando
-zek ask "<mensaje>"         # pregunta a Claude fuera de flujos
-zek completion --shell <sh> # genera completions (bash|zsh|fish|powershell|elvish)
-zek <flujo>|<comando>       # resuelve flujo primero, luego comando
-zek <flujo> --clave valor   # argumentos accesibles como {{args.clave}}
+zek init [dir]              # initial setup (or re-configure)
+zek config show             # displays current configuration
+zek config set-dir <path>   # changes working directory
+zek config set-language <lang>  # changes language (en | es, default en)
+zek list                    # list commands and flows
+zek commands <name>         # displays a command configuration
+zek ask "<message>"         # ask Claude outside of flows
+zek completion --shell <sh> # generates shell completions (bash|zsh|fish|powershell|elvish)
+zek <flow>|<command>        # resolves flow first, then command
+zek <flow> --key value      # arguments accessible as {{args.key}}
 ```
 
-Flags globales: `--dry-run`, `--verbose/-v`, `--debug`, `--timeout-global <seg>`,
-`--log <archivo>` (guarda un log de la ejecución) y `--report <json|markdown>`
-(exporta un reporte a stdout en vez del resumen). Los flags globales van antes
-del nombre del flujo/comando: `zek --log run.log deploy` o
-`zek --report json deploy > report.json`.
+Global flags: `--dry-run`, `--verbose/-v`, `--debug`, `--timeout-global <sec>`, `--log <file>` (saves execution log), and `--report <json|markdown>` (exports a report to stdout instead of summary). Global flags must precede the flow/command name: `zek --log run.log deploy` or `zek --report json deploy > report.json`.
 
-Exit codes: `0` success, `2` failed, `3` aborted (loop infinito).
+Exit codes: `0` success, `2` failed, `3` aborted (infinite loop detected).
 
-## Desarrollo
+## Development
 
 ```bash
 cargo build --workspace
@@ -327,13 +297,8 @@ cargo fmt --all -- --check
 
 ## Release
 
-El tag de una versión dispara el workflow `.github/workflows/release.yml`
-(cargo-dist), que genera binarios multi-OS, installers y una GitHub Release:
+Tagging a release triggers the `.github/workflows/release.yml` workflow (cargo-dist), generating multi-OS binaries, installers, and a GitHub Release:
 
 ```bash
 git tag v0.1.0 && git push origin v0.1.0
 ```
-
-## Licencia
-
-MIT

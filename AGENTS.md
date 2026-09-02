@@ -1,16 +1,14 @@
-# zek — Orquestador de flujos de comandos
+# zek — Command flow orchestrator
 
-Orquestador de flujos de comandos para la terminal, escrito en Rust. Ejecuta
-comandos definidos en YAML, los encadena en flujos con reintentos y manejo de
-errores, y se integra con **Claude** (`claude -p`) y **OpenCode** (`opencode run`).
+Command flow orchestrator for the terminal, written in Rust. Executes commands defined in YAML, chains them into flows with retries and error handling, and integrates with **Claude** (`claude -p`) and **OpenCode** (`opencode run`).
 
-## Estructura del proyecto
+## Project Structure
 
 ```
 zek/
 ├── Cargo.toml              # Workspace (resolver = "2")
 ├── Cargo.lock
-├── dist-workspace.toml      # Config de cargo-dist (release)
+├── dist-workspace.toml      # cargo-dist config (release)
 ├── README.md
 ├── ROADMAP.md
 ├── LICENSE
@@ -18,33 +16,33 @@ zek/
 ├── .github/
 │   └── workflows/           # CI / release (cargo-dist)
 ├── scripts/
-│   └── install.sh           # build release + copia a ~/.local/bin
-├── zek-cli/                 # Binario `zek` (CLI)
+│   └── install.sh           # build release + copy to ~/.local/bin
+├── zek-cli/                 # `zek` binary (CLI)
 │   ├── Cargo.toml
 │   └── src/
-│       ├── main.rs          # Argumentos CLI (clap), subcomandos
-│       └── commands.rs      # Implementación de los subcomandos
-└── zek-core/                # Librería (núcleo: config, comandos, flujos)
+│       ├── main.rs          # CLI arguments (clap), subcommands
+│       └── commands.rs      # Subcommand implementations
+└── zek-core/                # Library (core: config, commands, flows)
     ├── Cargo.toml
     ├── src/
-    │   ├── lib.rs           # Re-exporta todos los módulos
-    │   ├── config.rs        # Config global (~/.config/zek) y por proyecto (zek.yaml)
-    │   ├── commands.rs      # Comandos reutilizables (commands/*.yaml)
-    │   ├── flows.rs         # Flujos (flows/*.yaml) y bloque finally
-    │   ├── step.rs          # Tipos y campos de un step
-    │   ├── execution.rs     # Motor de ejecución de flujos (FlowRunner)
-    │   ├── exec.rs          # Ejecución de procesos + reintentos
-    │   ├── context.rs       # Contexto compartido + templating Handlebars
-    │   ├── condition.rs     # Evaluación de condiciones `when`
-    │   ├── claude.rs        # Cliente de `claude -p`
-    │   ├── opencode.rs      # Cliente de `opencode run`
-    │   ├── parser.rs        # Extracción de bloques JSON de outputs
-    │   ├── error.rs         # Tipo de error unificado (ZekError)
-    │   ├── lang.rs          # Idioma de mensajes (en/es)
-    │   └── util.rs          # Utilidades (listar YAML, expandir env vars)
+    │   ├── lib.rs           # Re-exports all modules
+    │   ├── config.rs        # Global config (~/.config/zek) and per-project config (zek.yaml)
+    │   ├── commands.rs      # Reusable commands (commands/*.yaml)
+    │   ├── flows.rs         # Flows (flows/*.yaml) and finally block
+    │   ├── step.rs          # Step types and fields
+    │   ├── execution.rs     # Flow execution engine (FlowRunner)
+    │   ├── exec.rs          # Process execution + retries
+    │   ├── context.rs       # Shared context + Handlebars templating
+    │   ├── condition.rs     # Evaluation of `when` conditions
+    │   ├── claude.rs        # `claude -p` client
+    │   ├── opencode.rs      # `opencode run` client
+    │   ├── parser.rs        # Extraction of JSON blocks from output
+    │   ├── error.rs         # Unified error type (ZekError)
+    │   ├── lang.rs          # Message language (en/es)
+    │   └── util.rs          # Utilities (list YAML, expand env vars)
     └── tests/
         ├── common/mod.rs
-        ├── fixtures/        # YAML de prueba (flows válidos e inválidos)
+        ├── fixtures/        # Test YAML (valid and invalid flows)
         ├── test_claude.rs
         ├── test_commands.rs
         ├── test_flows.rs
@@ -53,29 +51,25 @@ zek/
 
 ## Workspace
 
-- `zek-core`: librería con toda la lógica (config, comandos, flujos, ejecución).
-- `zek-cli`: binario `zek` que consume `zek-core` (clap, dialoguer, colored).
+- `zek-core`: library containing all core logic (config, commands, flows, execution).
+- `zek-cli`: `zek` binary consuming `zek-core` (clap, dialoguer, colored).
 
-Dependencias clave de `zek-core`: `serde`, `serde_yaml`, `serde_json`,
-`directories`, `handlebars` (templating), `futures`, `tokio`.
+Key dependencies of `zek-core`: `serde`, `serde_yaml`, `serde_json`, `directories`, `handlebars` (templating), `futures`, `tokio`.
 
-## Conceptos
+## Concepts
 
-- **Comando** (`commands/*.yaml`): acción reutilizable con `name`, `run`, `cwd`,
-  `timeout`, `env`.
-- **Flujo** (`flows/*.yaml`): encadena steps y un bloque opcional `finally`.
-- **Step**: tipos `command`, `claude`, `opencode` o `flow`; con campos como
-  `retries`, `retry_delay`, `on_error`, `on_success`, `when`, `parallel`, etc.
-- **Templating**: Handlebars con `{{steps.<name>.<campo>}}`, `{{args.<clave>}}` y
-  `{{flow.<campo>}}`.
-- **Condiciones** (`when`): comparaciones, lógica booleana y paréntesis.
+- **Command** (`commands/*.yaml`): reusable action with `name`, `run`, `cwd`, `timeout`, `env`.
+- **Flow** (`flows/*.yaml`): chains steps and an optional `finally` block.
+- **Step**: types `command`, `claude`, `opencode`, or `flow`; with fields such as `retries`, `retry_delay`, `on_error`, `on_success`, `when`, `parallel`, etc.
+- **Templating**: Handlebars with `{{steps.<name>.<field>}}`, `{{args.<key>}}`, and `{{flow.<field>}}`.
+- **Conditions** (`when`): comparisons, boolean logic, and parentheses.
 
-## Configuración
+## Configuration
 
 - Global: `~/.config/zek/config.yaml` (`$XDG_CONFIG_HOME/zek`, `%APPDATA%\zek`).
-- Por proyecto: `zek.yaml` en el directorio actual (o padres), solapa la global.
+- Per-project: `zek.yaml` in the current directory (or parent directories), overrides global config.
 
-## Comandos útiles
+## Useful Commands
 
 ```bash
 cargo build --workspace
