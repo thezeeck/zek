@@ -36,6 +36,10 @@ pub struct Flow {
     #[serde(default)]
     pub description: String,
 
+    /// Variables tipadas del flujo, disponibles como `{{vars.<clave>}}`.
+    #[serde(default, deserialize_with = "deserialize_vars")]
+    pub vars: HashMap<String, serde_json::Value>,
+
     #[serde(default = "default_max_jumps")]
     pub max_jumps: usize,
 
@@ -52,6 +56,61 @@ pub struct LoadedFlow {
     pub flow: Flow,
     pub source: PathBuf,
     pub warnings: Vec<String>,
+}
+
+fn deserialize_vars<'de, D>(deserializer: D) -> Result<HashMap<String, serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let yaml = serde_yaml::Value::deserialize(deserializer)?;
+    match yaml_to_json(yaml).map_err(serde::de::Error::custom)? {
+        serde_json::Value::Object(vars) => Ok(vars.into_iter().collect()),
+        _ => Err(serde::de::Error::custom(
+            crate::lang::messages().val_vars_json,
+        )),
+    }
+}
+
+// serde_json convertiría NaN/infinito silenciosamente a null. Validamos los
+// valores YAML antes de exponerlos como JSON para conservar tipos y datos.
+fn yaml_to_json(value: serde_yaml::Value) -> Result<serde_json::Value, &'static str> {
+    use serde_json::Value as Json;
+    use serde_yaml::Value as Yaml;
+    let invalid = crate::lang::messages().val_vars_json;
+    match value {
+        Yaml::Null => Ok(Json::Null),
+        Yaml::Bool(value) => Ok(Json::Bool(value)),
+        Yaml::String(value) => Ok(Json::String(value)),
+        Yaml::Number(number) => {
+            if let Some(value) = number.as_i64() {
+                Ok(Json::Number(value.into()))
+            } else if let Some(value) = number.as_u64() {
+                Ok(Json::Number(value.into()))
+            } else {
+                number
+                    .as_f64()
+                    .and_then(serde_json::Number::from_f64)
+                    .map(Json::Number)
+                    .ok_or(invalid)
+            }
+        }
+        Yaml::Sequence(values) => values
+            .into_iter()
+            .map(yaml_to_json)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Json::Array),
+        Yaml::Mapping(values) => values
+            .into_iter()
+            .map(|(key, value)| {
+                let Yaml::String(key) = key else {
+                    return Err(invalid);
+                };
+                Ok((key, yaml_to_json(value)?))
+            })
+            .collect::<Result<serde_json::Map<_, _>, _>>()
+            .map(Json::Object),
+        Yaml::Tagged(_) => Err(invalid),
+    }
 }
 
 /// Índice nombre de step -> número de línea (para errores con `archivo:línea`).

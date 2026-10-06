@@ -29,6 +29,8 @@ pub struct ExecutionContext {
     targeted: HashSet<String>,
     /// Argumentos pasados por CLI (accesibles como `{{args.<clave>}}`).
     args: HashMap<String, String>,
+    /// Variables del scope activo; no se mezclan con los argumentos de CLI.
+    vars: HashMap<String, serde_json::Value>,
     /// Pila de invocaciones activa, independiente de los saltos `goto`.
     pub(crate) flow_stack: Vec<String>,
 }
@@ -80,6 +82,15 @@ impl ExecutionContext {
         self.args = args;
     }
 
+    /// Reemplaza las variables del scope activo, disponibles como `{{vars.*}}`.
+    pub fn set_vars(&mut self, vars: HashMap<String, serde_json::Value>) {
+        self.vars = vars;
+    }
+
+    pub fn vars(&self) -> &HashMap<String, serde_json::Value> {
+        &self.vars
+    }
+
     /// Nombres de steps cuyo estado final no fue exitoso, en orden de ejecución.
     pub fn failed_step_names(&self) -> Vec<String> {
         self.order
@@ -95,7 +106,8 @@ impl ExecutionContext {
     }
 
     /// Renderiza un template con handlebars, exponiendo `{{steps.<name>.<campo>}}`
-    /// y `{{flow.<campo>}}`. Las variables faltantes se resuelven a cadena vacía.
+    /// `{{args.<clave>}}`, `{{vars.<clave>}}` y `{{flow.<campo>}}`.
+    /// Las variables faltantes se resuelven a cadena vacía.
     pub fn render(&self, template: &str) -> Result<String, ZekError> {
         let mut handlebars = Handlebars::new();
         handlebars.register_escape_fn(handlebars::no_escape);
@@ -128,6 +140,7 @@ impl ExecutionContext {
         json!({
             "steps": steps,
             "args": args,
+            "vars": self.vars,
             "flow": {
                 "status": self.flow_status.map(|s| s.as_str()).unwrap_or(""),
                 "failed_steps": self.failed_step_names().join(","),

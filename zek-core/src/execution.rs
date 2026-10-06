@@ -75,6 +75,7 @@ pub struct FlowRunner<'a> {
     progress: Option<Arc<ProgressCb>>,
     confirm: Option<Arc<ConfirmCb>>,
     args: HashMap<String, String>,
+    vars: HashMap<String, serde_json::Value>,
 }
 
 impl<'a> FlowRunner<'a> {
@@ -130,6 +131,7 @@ impl<'a> FlowRunner<'a> {
             progress: None,
             confirm: None,
             args: HashMap::new(),
+            vars: HashMap::new(),
         }
     }
 
@@ -157,10 +159,20 @@ impl<'a> FlowRunner<'a> {
         self
     }
 
+    /// Overrides de las variables del flujo raíz. Los subflujos heredan el
+    /// resultado y pueden reemplazar claves con sus propias variables locales.
+    pub fn with_vars(mut self, vars: HashMap<String, serde_json::Value>) -> Self {
+        self.vars = vars;
+        self
+    }
+
     pub async fn run(&self) -> Result<FlowReport, ZekError> {
         let start = Instant::now();
         let mut ctx = ExecutionContext::new();
         ctx.set_args(self.args.clone());
+        let mut vars = self.flow.vars.clone();
+        vars.extend(self.vars.clone());
+        ctx.set_vars(vars);
         let mut skipped = Vec::new();
 
         let (status, exit_reason) = self
@@ -200,11 +212,18 @@ impl<'a> FlowRunner<'a> {
                 MAX_FLOW_DEPTH
             )));
         }
+        let inherited_vars = ctx.vars().clone();
+        if !ctx.flow_stack.is_empty() {
+            let mut scoped_vars = inherited_vars.clone();
+            scoped_vars.extend(flow.vars.clone());
+            ctx.set_vars(scoped_vars);
+        }
         ctx.flow_stack.push(flow.name.clone());
         // La future del motor contiene los lectores de procesos. Alojarla en
         // el heap evita acumular ese tamaño en la pila de cada subflujo.
         let result = Box::pin(self.run_flow_body(flow, ctx, skipped)).await;
         ctx.flow_stack.pop();
+        ctx.set_vars(inherited_vars);
         result
     }
 

@@ -133,10 +133,36 @@ Place global options **before** the flow or command name:
 | `--timeout-global <seconds>` | Limit the whole flow, or override a direct command's timeout |
 | `--log <file>` | Write execution events to a log file |
 | `--report <json\|markdown>` | Export a flow report to stdout |
+| `--var KEY=VALUE` | Override a root flow variable; repeat before the flow name |
 
 Plan previews and structured reports apply to flows. Direct commands stream their output.
 
 ## Parameters and AI steps
+
+Declare typed defaults in a flow's top-level `vars` mapping:
+
+```yaml
+name: welcome
+vars:
+  name: Ada
+  enabled: true
+  settings: {environment: dev}
+steps:
+  - name: hello
+    type: command
+    command: echo "Hello {{vars.name}} from {{vars.settings.environment}}"
+    when: "{{vars.enabled}}"
+```
+
+```bash
+zek --var name=Grace --var 'settings={"environment":"prod"}' welcome
+```
+
+`--var` accepts JSON values (including numbers, booleans, null, objects, and arrays), or plain text as a string. JSON-quote a value to force a string: `--var 'name="true"'`. Empty values and text that is not valid JSON remain strings. Missing `=` or an empty key is an error; duplicate keys use the last assignment.
+
+Overrides replace entire top-level values. Subflows inherit resolved parent variables, shadow keys declared locally, and restore the parent's scope on return. Variables can be used in prompts, conditions, commands, and environment values. YAML values must be JSON-compatible, with finite numbers, string object keys, and no custom tags.
+
+Place `--var` before the flow name. After the name, `--var` remains an ordinary flow argument exposed as `{{args.var}}`; it does not override variables. Direct commands and built-in subcommands do not accept flow overrides.
 
 Flow parameters accept `--key value` and `--key=value`. For example, `zek greet --name Ada` makes `{{args.name}}` available to the flow:
 

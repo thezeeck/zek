@@ -38,6 +38,10 @@ struct Cli {
     #[arg(long, global = true, value_enum)]
     report: Option<ReportFormat>,
 
+    /// Override a root flow variable (repeatable; JSON values or plain strings)
+    #[arg(long = "var", value_name = "KEY=VALUE")]
+    vars: Vec<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -115,6 +119,9 @@ async fn run(cli: Cli) -> Result<i32> {
     if let Ok(config) = zek_core::config::Config::load() {
         zek_core::lang::set(config.language);
     }
+    if !cli.vars.is_empty() && !matches!(&cli.command, Some(Command::Run(_))) {
+        bail!(zek_core::lang::messages().err_vars_require_flow);
+    }
 
     match cli.command {
         Some(Command::Init { dir }) => {
@@ -170,6 +177,7 @@ async fn run(cli: Cli) -> Result<i32> {
             commands::run_by_name(
                 &name,
                 &rest,
+                &cli.vars,
                 cli.dry_run,
                 cli.verbose,
                 cli.debug,

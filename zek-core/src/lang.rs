@@ -82,6 +82,7 @@ pub struct Messages {
     pub val_flow_ref_missing: &'static str,
     pub val_flow_recursive: &'static str,
     pub val_flow_depth: &'static str,
+    pub val_vars_json: &'static str,
     pub val_parallel_action: &'static str,
 
     // Razones de salida de ejecución.
@@ -140,6 +141,8 @@ pub struct Messages {
     pub err_command_not_found: &'static str,
     pub err_claude_failed: &'static str,
     pub err_name_not_found: &'static str,
+    pub err_var_invalid: &'static str,
+    pub err_vars_require_flow: &'static str,
     pub confirm_step: &'static str,
     pub plan_label: &'static str,
     pub plan_finally: &'static str,
@@ -202,6 +205,7 @@ pub const EN: Messages = Messages {
     val_parallel_flow: "flow step '{}' cannot run in parallel",
     val_flow_recursive: "recursive flow references: {}",
     val_flow_depth: "maximum flow nesting depth exceeded ({})",
+    val_vars_json: "vars must be an object of JSON-compatible values: finite numbers, string object keys, and no YAML tags",
     val_flow_ref_missing: "step references flow '{}' which does not exist",
     val_parallel_action: "parallel step '{}' cannot set on_error/on_success",
 
@@ -258,6 +262,8 @@ pub const EN: Messages = Messages {
     err_command_not_found: "command not found: {}",
     err_claude_failed: "claude terminated with an error (exit code {})",
     err_name_not_found: "no flow or command named: {}",
+    err_var_invalid: "invalid --var '{}': expected a nonempty KEY=VALUE",
+    err_vars_require_flow: "--var is only supported when running a flow",
     confirm_step: "Run step '{}'?",
     plan_label: "Plan: {}",
     plan_finally: "  finally:",
@@ -322,6 +328,7 @@ pub const ES: Messages = Messages {
     val_parallel_flow: "el step flow '{}' no puede correr en paralelo",
     val_flow_recursive: "referencias recursivas entre flujos: {}",
     val_flow_depth: "se excedió la profundidad máxima de flujos ({})",
+    val_vars_json: "vars debe ser un objeto de valores compatibles con JSON: números finitos, claves de objeto string y sin tags YAML",
     val_flow_ref_missing: "el step referencia el flujo '{}' que no existe",
     val_parallel_action: "el step paralelo '{}' no puede definir on_error/on_success",
 
@@ -378,6 +385,8 @@ pub const ES: Messages = Messages {
     err_command_not_found: "comando no encontrado: {}",
     err_claude_failed: "claude terminó con error (exit code {})",
     err_name_not_found: "no existe el flujo ni el comando: {}",
+    err_var_invalid: "--var inválido '{}': se esperaba CLAVE=VALOR con una clave no vacía",
+    err_vars_require_flow: "--var solo se admite al ejecutar un flujo",
     confirm_step: "¿Ejecutar el step '{}'?",
     plan_label: "Plan: {}",
     plan_finally: "  finally:",

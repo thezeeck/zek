@@ -213,6 +213,7 @@ pub async fn ask(message: &str) -> Result<()> {
 pub async fn run_by_name(
     name: &str,
     args: &[String],
+    vars: &[String],
     dry_run: bool,
     verbose: bool,
     debug: bool,
@@ -221,6 +222,7 @@ pub async fn run_by_name(
     report: Option<ReportFormat>,
 ) -> Result<i32> {
     let config = ensure_config()?;
+    let vars = parse_vars(vars)?;
     let commands = core_commands::load_all(&config.commands_dir())?;
     let flows = core_flows::load_all(&config.flows_dir())?;
     let opts = RunOptions {
@@ -230,12 +232,16 @@ pub async fn run_by_name(
         timeout_global,
         log,
         report,
+        vars,
     };
 
     if let Some(loaded) = flows.get(name) {
         return run_flow(&config, &commands, &flows, loaded, args, &opts).await;
     }
     if let Some(loaded) = commands.get(name) {
+        if !opts.vars.is_empty() {
+            bail!("{}", lang::messages().err_vars_require_flow);
+        }
         return run_command(&config, loaded, &opts).await;
     }
     bail!("{}", t!(err_name_not_found, name));
@@ -248,6 +254,7 @@ struct RunOptions {
     timeout_global: Option<u64>,
     log: Option<PathBuf>,
     report: Option<ReportFormat>,
+    vars: HashMap<String, serde_json::Value>,
 }
 
 async fn run_flow(
@@ -282,6 +289,7 @@ async fn run_flow(
     let runner = FlowRunner::new(flow, commands, config.workdir.clone(), stream)
         .with_flows(flows)
         .with_args(params)
+        .with_vars(opts.vars.clone())
         .on_progress(Arc::new(move |p| {
             log_progress(&progress_logger, &p);
             print_progress(p);
@@ -713,6 +721,22 @@ fn log_progress(logger: &Logger, progress: &StepProgress) {
     }
 }
 
+/// Parsea overrides KEY=VALUE: JSON válido conserva su tipo; el resto es texto.
+/// Una clave repetida usa su última asignación, sin modificar los argumentos.
+fn parse_vars(vars: &[String]) -> Result<HashMap<String, serde_json::Value>> {
+    let mut parsed = HashMap::new();
+    for definition in vars {
+        let (key, value) = definition
+            .split_once('=')
+            .filter(|(key, _)| !key.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!(t!(err_var_invalid, definition)))?;
+        let value = serde_json::from_str(value)
+            .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
+        parsed.insert(key.trim().to_string(), value);
+    }
+    Ok(parsed)
+}
+
 /// Parsea argumentos de CLI como pares clave/valor para `{{args.<clave>}}`.
 /// Acepta `--clave valor`, `--clave=valor` y `--flag` (que queda como "").
 fn parse_params(args: &[String]) -> HashMap<String, String> {
@@ -864,5 +888,46 @@ mod tests {
         let p = params(&["extra", "--branch", "x"]);
         assert_eq!(p.get("branch").map(String::as_str), Some("x"));
         assert!(!p.contains_key("extra"));
+    }
+
+    #[test]
+    fn vars_preserve_json_types_and_literal_text() {
+        let definitions = [
+            "number=42",
+            "float=1.5",
+            "enabled=false",
+            "empty=null",
+            r#"object={"nested":1}"#,
+            "items=[1,true]",
+            r#"text="true""#,
+            "raw=a=b",
+            "blank=",
+            "invalid={broken}",
+        ]
+        .map(String::from);
+        let vars = parse_vars(&definitions).unwrap();
+        assert_eq!(vars["number"], serde_json::json!(42));
+        assert_eq!(vars["float"], serde_json::json!(1.5));
+        assert_eq!(vars["enabled"], serde_json::json!(false));
+        assert_eq!(vars["empty"], serde_json::Value::Null);
+        assert_eq!(vars["object"], serde_json::json!({"nested": 1}));
+        assert_eq!(vars["items"], serde_json::json!([1, true]));
+        assert_eq!(vars["text"], serde_json::json!("true"));
+        assert_eq!(vars["raw"], serde_json::json!("a=b"));
+        assert_eq!(vars["blank"], serde_json::json!(""));
+        assert_eq!(vars["invalid"], serde_json::json!("{broken}"));
+    }
+
+    #[test]
+    fn vars_replace_whole_values_and_reject_empty_keys() {
+        let vars = parse_vars(&[
+            r#"object={"first":1}"#.into(),
+            r#"object={"second":2}"#.into(),
+        ])
+        .unwrap();
+        assert_eq!(vars["object"], serde_json::json!({"second": 2}));
+        for input in ["missing", "=value", " =value"] {
+            assert!(parse_vars(&[input.into()]).is_err());
+        }
     }
 }

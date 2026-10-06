@@ -168,7 +168,7 @@ finally:
 
 ### Templating
 
-Prompts and commands use [Handlebars](https://handlebarsjs.com/). Available placeholders include `{{steps.<name>.<field>}}` (with `status`, `stdout`, `stderr`, `exit_code`, `attempts`), `{{args.<key>}}` (arguments passed via CLI), and, inside `finally`, `{{flow.<field>}}` (with `status`, `failed_steps`, and `exit_reason`). Missing variables resolve to an empty string.
+Prompts and commands use [Handlebars](https://handlebarsjs.com/). Available placeholders include `{{steps.<name>.<field>}}` (with `status`, `stdout`, `stderr`, `exit_code`, `attempts`), `{{args.<key>}}` (arguments passed via CLI), `{{vars.<key>}}` (typed flow variables), and, inside `finally`, `{{flow.<field>}}` (with `status`, `failed_steps`, and `exit_reason`). Missing variables resolve to an empty string.
 
 Placeholder values are inserted literally, without HTML escaping. Commands still run through the shell, so use shell quoting appropriate to the values you pass.
 
@@ -260,6 +260,38 @@ steps:
 
 ### CLI Arguments
 
+Flow variables can be declared at the top level and used in commands, prompts, conditions, and environment values:
+
+```yaml
+name: greet
+vars:
+  name: Ada
+  enabled: true
+  settings:
+    environment: dev
+  targets: [api, web]
+steps:
+  - name: hello
+    type: command
+    command: echo "Hello {{vars.name}} from {{vars.settings.environment}}"
+    when: "{{vars.enabled}}"
+```
+
+Override root variables with repeatable `--var KEY=VALUE` options **before** the flow name:
+
+```bash
+zek --var name=Grace --var 'settings={"environment":"prod"}' greet
+zek --var 'name="true"' greet
+```
+
+Values that parse as JSON keep their type; other text becomes a string. This includes numbers, booleans, `null`, arrays, and objects. JSON-quoted strings force string values such as `"true"` or `"42"`. An empty value is an empty string; malformed JSON is also literal text. Keys must be nonempty, and the last assignment to a repeated key wins.
+
+Each override replaces a whole top-level value, including an object or array; it does not update nested paths or deep-merge objects. YAML variables support the same JSON-compatible types, with finite numbers and string object keys; YAML tags are not supported. Values are literal data, without recursive template expansion.
+
+Root precedence is YAML defaults followed by CLI overrides. Subflows inherit the parent's resolved variables and replace keys declared in their own `vars`. Local values remain active through the child's `finally`, then the parent scope is restored, including after failures. CLI overrides do not override a child's explicit local value.
+
+`--var` applies to flows. Options after the flow name retain the existing argument behavior described below; `{{args.*}}` remains separate from `{{vars.*}}`.
+
 Parameters can be passed to a flow using `--key value` (or `--key=value`) and referenced inside the YAML as `{{args.<key>}}`:
 
 ```bash
@@ -292,6 +324,6 @@ zek <flow>|<command>        # resolves flow first, then command
 zek <flow> --key value      # arguments accessible as {{args.key}}
 ```
 
-Global flags: `--dry-run`, `--verbose/-v`, `--debug`, `--timeout-global <sec>`, `--log <file>` (saves execution log), and `--report <json|markdown>` (exports a report to stdout instead of summary). Global flags must precede the flow/command name: `zek --log run.log deploy` or `zek --report json deploy > report.json`.
+Global flags: `--dry-run`, `--verbose/-v`, `--debug`, `--timeout-global <sec>`, `--log <file>` (saves execution log), and `--report <json|markdown>` (exports a report to stdout instead of summary). Use `--var KEY=VALUE` for flow variable overrides. Options must precede the flow/command name: `zek --log run.log deploy` or `zek --report json deploy > report.json`.
 
 Exit codes: `0` success, `2` failed, `3` aborted (infinite loop detected).

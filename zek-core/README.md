@@ -110,6 +110,7 @@ pub async fn run_configured_flow(name: &str) -> Result<FlowReport, ZekError> {
 | Method | Purpose |
 | --- | --- |
 | `with_args(HashMap<String, String>)` | Supply values for `{{args.<key>}}` |
+| `with_vars(HashMap<String, serde_json::Value>)` | Override root flow defaults for `{{vars.<key>}}` |
 | `with_flows(&HashMap<String, LoadedFlow>)` | Supply the catalog required by `type: flow` steps |
 | `on_progress(Arc<...>)` | Receive `StepProgress::Started` and `StepProgress::Finished` events |
 | `on_confirm(Arc<...>)` | Decide whether a `confirm: true` step may run |
@@ -117,6 +118,29 @@ pub async fn run_configured_flow(name: &str) -> Result<FlowReport, ZekError> {
 | `FlowRunner::with_opencode(...)` | Construct a runner with a custom OpenCode executable |
 
 Progress callbacks implement `Fn(StepProgress) + Send + Sync`; confirmation callbacks implement `Fn(&str) -> bool + Send + Sync`. Steps requiring confirmation are skipped unless a callback returns `true`.
+
+## Typed flow variables
+
+`Flow::vars` is a `HashMap<String, serde_json::Value>` populated from the optional YAML `vars` mapping. It supports strings, finite numbers, booleans, null, arrays, and objects with string keys; non-finite numbers and YAML tags are rejected.
+
+```yaml
+name: greeting
+vars:
+  name: Ada
+  settings: {count: 2}
+  enabled: true
+steps:
+  - name: hello
+    type: command
+    command: echo "Hello {{vars.name}}"
+    when: "{{vars.enabled}} && {{vars.settings.count}} > 0"
+```
+
+Pass a map to `FlowRunner::with_vars` to replace root defaults. Each entry replaces the entire value for that key; objects are not deep-merged. Library callers supply already typed JSON values. If constructing an override with `serde_json::json!`, add `serde_json = "1"` as a direct dependency of your application.
+
+Subflows inherit the parent's resolved map, then apply their own local variables. Child variables are active through cleanup and are restored to the parent scope on return, including errors and retries. CLI overrides apply to root defaults and do not supersede explicit child defaults.
+
+Use `ExecutionContext::vars()` to inspect the active map and `set_vars(...)` when constructing a context for direct template rendering. The returned `FlowReport.results` retains the resolved root variables. Access nested data with `{{vars.settings.count}}` or `{{vars.items.0}}`; missing variables render as empty strings. Variables contain literal data and remain separate from `{{args.*}}`.
 
 ## Results and errors
 
@@ -138,7 +162,7 @@ Use `ExecutionContext::ordered_results()` for deterministic result order, or `ge
 - Timeouts cover process waiting and output capture. Timeout or cancellation terminates the managed process group on Unix or job on Windows and closes the readers.
 - Consecutive `parallel: true` steps execute together against the same prior context. Parallel steps cannot invoke flows or specify `on_error` / `on_success` actions.
 - Runtime invocation rejects active recursion and limits nesting to 16 flows. Sequential invocations of the same flow are allowed.
-- Templates expose `steps`, `args`, and the flow result available to `finally`. Missing values become empty strings. Values are inserted literally; shell quoting is the caller's responsibility.
+- Templates expose `steps`, `args`, `vars`, and the flow result available to `finally`. Missing values become empty strings. Values are inserted literally; shell quoting is the caller's responsibility.
 
 For YAML fields, examples of conditions, `goto`, and session continuation, see the [project reference](https://github.com/thezeeck/zek#flows-flowsyaml).
 
