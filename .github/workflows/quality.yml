@@ -1,0 +1,33 @@
+name: Code quality
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component clippy --component rustfmt
+      - name: Format
+        run: cargo +stable fmt --all -- --check
+      - name: Lint
+        run: cargo +stable clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Test
+        run: cargo +stable test --workspace --locked
+
+  windows-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Check Windows code
+        run: cargo +stable check --workspace --all-targets --locked
+      - name: Test Windows process management
+        run: cargo +stable test -p zek-core --test test_windows_processes --locked

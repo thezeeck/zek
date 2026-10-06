@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -380,11 +380,14 @@ fn print_progress(progress: StepProgress) {
 }
 
 fn confirm_step(name: &str) -> bool {
+    if !std::io::stdin().is_terminal() {
+        return false;
+    }
     Confirm::new()
         .with_prompt(t!(confirm_step, name))
         .default(true)
         .interact()
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 fn print_plan(flow: &Flow) {

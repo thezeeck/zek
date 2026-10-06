@@ -168,7 +168,25 @@ async fn run_command(cmd: Command, timeout_dur: Duration, stream: bool) -> StepE
     let mut cmd = cmd;
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    // En Windows se asigna el job antes de permitir que el hijo cree procesos.
+    #[cfg(windows)]
+    cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+
+    #[cfg(windows)]
+    let process_tree = match process_tree::ProcessTree::new() {
+        Ok(tree) => tree,
+        Err(e) => {
+            return StepExecutionStatus::Failed {
+                stdout: String::new(),
+                stderr: crate::t!(exec_spawn_failed, e),
+                exit_code: -1,
+            };
+        }
+    };
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -181,44 +199,51 @@ async fn run_command(cmd: Command, timeout_dur: Duration, stream: bool) -> StepE
         }
     };
 
+    #[cfg(unix)]
+    let process_tree = process_tree::ProcessTree::new(child.id().unwrap());
+    #[cfg(windows)]
+    if let Err(e) = process_tree.attach(&child) {
+        let _ = child.kill().await;
+        return StepExecutionStatus::Failed {
+            stdout: String::new(),
+            stderr: crate::t!(exec_spawn_failed, e),
+            exit_code: -1,
+        };
+    }
+
     let stdout_pipe = child.stdout.take().unwrap();
     let stderr_pipe = child.stderr.take().unwrap();
 
     let stdout_buf = Arc::new(Mutex::new(Vec::new()));
     let stderr_buf = Arc::new(Mutex::new(Vec::new()));
 
-    let stdout_task = tokio::spawn(read_and_stream(
-        stdout_pipe,
-        stream,
-        false,
-        stdout_buf.clone(),
-    ));
-    let stderr_task = tokio::spawn(read_and_stream(
-        stderr_pipe,
-        stream,
-        true,
-        stderr_buf.clone(),
-    ));
+    // La espera y ambos lectores comparten el mismo plazo. Al cancelar esta
+    // future se cierran los pipes; no quedan tareas de lectura desprendidas.
+    let execution = async {
+        let (status, (), ()) = tokio::join!(
+            child.wait(),
+            read_and_stream(stdout_pipe, stream, false, stdout_buf.clone()),
+            read_and_stream(stderr_pipe, stream, true, stderr_buf.clone()),
+        );
+        status
+    };
 
-    match timeout(timeout_dur, child.wait()).await {
-        // Timeout: matamos el proceso y devolvemos lo capturado hasta ahora.
+    match timeout(timeout_dur, execution).await {
         Err(_) => {
+            #[cfg(any(unix, windows))]
+            drop(process_tree);
             let _ = child.kill().await;
             StepExecutionStatus::TimedOut {
                 stdout: drain(&stdout_buf).await,
                 stderr: drain(&stderr_buf).await,
             }
         }
-        Ok(Err(e)) => {
-            let _ = tokio::join!(stdout_task, stderr_task);
-            StepExecutionStatus::Failed {
-                stdout: drain(&stdout_buf).await,
-                stderr: crate::t!(exec_wait_failed, e),
-                exit_code: -1,
-            }
-        }
+        Ok(Err(e)) => StepExecutionStatus::Failed {
+            stdout: drain(&stdout_buf).await,
+            stderr: crate::t!(exec_wait_failed, e),
+            exit_code: -1,
+        },
         Ok(Ok(status)) => {
-            let _ = tokio::join!(stdout_task, stderr_task);
             let stdout = drain(&stdout_buf).await;
             let stderr = drain(&stderr_buf).await;
             let exit_code = status.code().unwrap_or(-1);
@@ -236,6 +261,127 @@ async fn run_command(cmd: Command, timeout_dur: Duration, stream: bool) -> StepE
                 }
             }
         }
+    }
+}
+
+// El guard también termina los descendientes si se cancela la future desde
+// fuera (por ejemplo, con --timeout-global), incluso si el shell ya salió.
+#[cfg(unix)]
+mod process_tree {
+    pub(super) struct ProcessTree(libc::pid_t);
+
+    impl ProcessTree {
+        pub(super) fn new(pid: u32) -> Self {
+            Self(pid as libc::pid_t)
+        }
+    }
+
+    impl Drop for ProcessTree {
+        fn drop(&mut self) {
+            // SAFETY: el hijo es líder de un grupo propio (process_group(0));
+            // el PID negativo señala ese grupo, nunca el grupo de zek.
+            unsafe { libc::kill(-self.0, libc::SIGKILL) };
+        }
+    }
+}
+
+#[cfg(windows)]
+mod process_tree {
+    use std::io;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    pub(super) struct ProcessTree(OwnedHandle);
+
+    impl ProcessTree {
+        pub(super) fn new() -> io::Result<Self> {
+            // SAFETY: punteros nulos crean un job sin nombre ni atributos extra.
+            let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if handle.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: CreateJobObjectW devuelve un handle válido y propio.
+            let job = Self(unsafe { OwnedHandle::from_raw_handle(handle) });
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: estructura, tamaño y clase de información coinciden.
+            let ok = unsafe {
+                SetInformationJobObject(
+                    job.0.as_raw_handle() as HANDLE,
+                    JobObjectExtendedLimitInformation,
+                    &limits as *const _ as *const _,
+                    std::mem::size_of_val(&limits) as u32,
+                )
+            };
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(job)
+        }
+
+        pub(super) fn attach(&self, child: &tokio::process::Child) -> io::Result<()> {
+            let handle = child.raw_handle().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "child process handle unavailable")
+            })?;
+            // SAFETY: ambos handles siguen vivos durante la llamada.
+            if unsafe {
+                AssignProcessToJobObject(self.0.as_raw_handle() as HANDLE, handle as HANDLE)
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            resume_child(child.id().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "child process ID unavailable")
+            })?)
+        }
+    }
+
+    fn resume_child(pid: u32) -> io::Result<()> {
+        // SAFETY: la API crea un snapshot propio de los threads del sistema.
+        let handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: el snapshot válido pertenece exclusivamente a este guard.
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(handle) };
+        let mut entry = THREADENTRY32 {
+            dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: snapshot válido y estructura con tamaño inicializado.
+        let mut found = unsafe { Thread32First(snapshot.as_raw_handle() as HANDLE, &mut entry) };
+        while found != 0 {
+            if entry.th32OwnerProcessID == pid {
+                // El proceso sigue suspendido: todavía solo tiene su thread inicial.
+                // SAFETY: abrimos el thread identificado con permiso mínimo.
+                let handle = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if handle.is_null() {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: OpenThread devolvió un handle válido y propio.
+                let thread = unsafe { OwnedHandle::from_raw_handle(handle) };
+                // SAFETY: el thread pertenece al hijo suspendido ya asignado al job.
+                if unsafe { ResumeThread(thread.as_raw_handle() as HANDLE) } == u32::MAX {
+                    return Err(io::Error::last_os_error());
+                }
+                return Ok(());
+            }
+            // SAFETY: el snapshot y la estructura siguen vivos.
+            found = unsafe { Thread32Next(snapshot.as_raw_handle() as HANDLE, &mut entry) };
+        }
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "suspended child thread unavailable",
+        ))
     }
 }
 

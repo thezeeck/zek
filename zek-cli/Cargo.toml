@@ -16,7 +16,7 @@ name = "zek"
 path = "src/main.rs"
 
 [dependencies]
-zek-core = { path = "../zek-core", version = "0.2.0" }
+zek-core = { path = "../zek-core", version = "0.2.1" }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 dialoguer = "0.11"
@@ -25,3 +25,6 @@ colored = "2"
 chrono = "0.4"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[dev-dependencies]
+tempfile = "3"

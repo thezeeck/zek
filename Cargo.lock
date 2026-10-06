@@ -1111,7 +1111,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "zek-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1120,22 +1120,25 @@ dependencies = [
  "colored",
  "dialoguer",
  "serde_json",
+ "tempfile",
  "tokio",
  "zek-core",
 ]
 
 [[package]]
 name = "zek-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "directories",
  "futures",
  "handlebars",
+ "libc",
  "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

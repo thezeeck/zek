@@ -8,7 +8,7 @@ use crate::commands::LoadedCommand;
 use crate::condition;
 use crate::context::{ExecutionContext, SerializedStepResult};
 use crate::error::{FlowFinalStatus, ZekError};
-use crate::exec::{execute_with_retries, CommandExecutor, StepExecutionStatus};
+use crate::exec::{CommandExecutor, StepExecutionStatus};
 use crate::flows::{Flow, LoadedFlow};
 use crate::opencode::{
     extract_session_id as extract_opencode_session_id, OpencodeClient, OpencodeOptions,
@@ -18,6 +18,8 @@ use crate::util::expand_env_vars;
 
 /// Máximo de saltos por defecto dentro de un bloque `finally`.
 pub const DEFAULT_FINALLY_MAX_JUMPS: usize = 5;
+/// Límite de invocaciones anidadas, independiente de `max_jumps`.
+pub const MAX_FLOW_DEPTH: usize = 16;
 
 /// Evento de progreso emitido durante la ejecución de un flujo.
 #[derive(Debug, Clone)]
@@ -184,25 +186,74 @@ impl<'a> FlowRunner<'a> {
         ctx: &mut ExecutionContext,
         skipped: &mut Vec<String>,
     ) -> Result<(FlowFinalStatus, String), ZekError> {
-        let (outcome, any_failed) = self
+        if ctx.flow_stack.contains(&flow.name) {
+            let mut cycle = ctx.flow_stack.clone();
+            cycle.push(flow.name.clone());
+            return Err(ZekError::InvalidConfig(crate::t!(
+                val_flow_recursive,
+                cycle.join(" -> ")
+            )));
+        }
+        if ctx.flow_stack.len() >= MAX_FLOW_DEPTH {
+            return Err(ZekError::InvalidConfig(crate::t!(
+                val_flow_depth,
+                MAX_FLOW_DEPTH
+            )));
+        }
+        ctx.flow_stack.push(flow.name.clone());
+        // La future del motor contiene los lectores de procesos. Alojarla en
+        // el heap evita acumular ese tamaño en la pila de cada subflujo.
+        let result = Box::pin(self.run_flow_body(flow, ctx, skipped)).await;
+        ctx.flow_stack.pop();
+        result
+    }
+
+    async fn run_flow_body(
+        &self,
+        flow: &Flow,
+        ctx: &mut ExecutionContext,
+        skipped: &mut Vec<String>,
+    ) -> Result<(FlowFinalStatus, String), ZekError> {
+        let main_result = self
             .run_steps(&flow.steps, ctx, skipped, flow.max_jumps, false)
-            .await?;
-        let (mut status, mut reason) = outcome_to_status(outcome, any_failed, flow.max_jumps);
+            .await;
+        let (mut status, mut reason) = match &main_result {
+            Ok((outcome, any_failed)) => {
+                outcome_to_status(outcome.clone(), *any_failed, flow.max_jumps)
+            }
+            Err(error) => (FlowFinalStatus::Failed, error.to_string()),
+        };
         ctx.set_flow_result(status, reason.clone());
 
+        let mut finally_error = None;
         if let Some(fin) = &flow.finally {
             if !fin.steps.is_empty() {
                 let max_jumps = fin.max_jumps.unwrap_or(DEFAULT_FINALLY_MAX_JUMPS);
-                let (_, fin_failed) = self
+                match self
                     .run_steps(&fin.steps, ctx, skipped, max_jumps, true)
-                    .await?;
-                if fin_failed && fin.fail_flow_on_error && status == FlowFinalStatus::Success {
-                    status = FlowFinalStatus::Failed;
-                    reason = "finally".to_string();
+                    .await
+                {
+                    Ok((outcome, failed)) => {
+                        if (failed || matches!(outcome, MainOutcome::Aborted))
+                            && fin.fail_flow_on_error
+                            && status == FlowFinalStatus::Success
+                        {
+                            status = FlowFinalStatus::Failed;
+                            reason = "finally".to_string();
+                        }
+                    }
+                    Err(error) => finally_error = Some(error),
                 }
             }
         }
 
+        ctx.set_flow_result(status, reason.clone());
+        // La limpieza se intenta también ante errores de configuración o
+        // plantillas; si ambos bloques fallan, se conserva el error principal.
+        main_result?;
+        if let Some(error) = finally_error {
+            return Err(error);
+        }
         Ok((status, reason))
     }
 
@@ -367,7 +418,7 @@ impl<'a> FlowRunner<'a> {
     fn ask_confirm(&self, name: &str) -> bool {
         match &self.confirm {
             Some(cb) => cb(name),
-            None => true,
+            None => false,
         }
     }
 
@@ -393,7 +444,7 @@ impl<'a> FlowRunner<'a> {
         let result = if step.step_type == StepType::Flow {
             self.run_flow_step(step, ctx).await?
         } else {
-            self.execute_step(step, ctx).await?
+            Box::pin(self.execute_step(step, ctx)).await?
         };
         ctx.record(step.name.clone(), result.clone());
         Ok(result)
@@ -406,16 +457,24 @@ impl<'a> FlowRunner<'a> {
         ctx: &ExecutionContext,
     ) -> Result<SerializedStepResult, ZekError> {
         let start = Instant::now();
-        let (status, attempts) = match step.step_type {
-            StepType::Command => self.run_command_step(step, ctx).await?,
-            StepType::Claude => self.run_claude_step(step, ctx).await?,
-            StepType::Opencode => self.run_opencode_step(step, ctx).await?,
-            StepType::Flow => {
-                return Err(ZekError::InvalidConfig(crate::t!(
-                    val_parallel_flow,
-                    step.name
-                )));
+        let mut attempts = 0;
+        let status = loop {
+            attempts += 1;
+            let status = match step.step_type {
+                StepType::Command => self.run_command_step(step, ctx).await?,
+                StepType::Claude => self.run_claude_step(step, ctx).await?,
+                StepType::Opencode => self.run_opencode_step(step, ctx).await?,
+                StepType::Flow => {
+                    return Err(ZekError::InvalidConfig(crate::t!(
+                        val_parallel_flow,
+                        step.name
+                    )));
+                }
+            };
+            if status.is_success() || attempts > step.retries {
+                break status;
             }
+            tokio::time::sleep(Duration::from_secs(step.retry_delay as u64)).await;
         };
         Ok(SerializedStepResult {
             status,
@@ -444,9 +503,23 @@ impl<'a> FlowRunner<'a> {
 
         let saved_status = ctx.flow_status;
         let saved_reason = ctx.exit_reason.clone();
-        let mut sub_skipped = Vec::new();
-        let (status, _reason) =
-            Box::pin(self.run_flow_internal(&loaded.flow, ctx, &mut sub_skipped)).await?;
+        let mut attempts = 0;
+        let status = loop {
+            attempts += 1;
+            // Cada intento parte del contexto del padre. Los resultados de un
+            // intento fallido no contaminan las condiciones del siguiente.
+            let mut attempt_ctx = ctx.clone();
+            let mut sub_skipped = Vec::new();
+            let result =
+                Box::pin(self.run_flow_internal(&loaded.flow, &mut attempt_ctx, &mut sub_skipped))
+                    .await;
+            let (status, _reason) = result?;
+            if status == FlowFinalStatus::Success || attempts > step.retries {
+                *ctx = attempt_ctx;
+                break status;
+            }
+            tokio::time::sleep(Duration::from_secs(step.retry_delay as u64)).await;
+        };
         ctx.flow_status = saved_status;
         ctx.exit_reason = saved_reason;
 
@@ -466,7 +539,7 @@ impl<'a> FlowRunner<'a> {
         Ok(SerializedStepResult {
             status,
             duration: start.elapsed(),
-            attempts: 1,
+            attempts,
         })
     }
 
@@ -474,7 +547,7 @@ impl<'a> FlowRunner<'a> {
         &self,
         step: &Step,
         ctx: &ExecutionContext,
-    ) -> Result<(StepExecutionStatus, u32), ZekError> {
+    ) -> Result<StepExecutionStatus, ZekError> {
         let resolved = resolve_command(step, self.commands)
             .ok_or_else(|| ZekError::InvalidConfig(crate::t!(val_step_no_command, step.name)))?;
         let run = ctx.render(&resolved.run)?;
@@ -491,20 +564,14 @@ impl<'a> FlowRunner<'a> {
             executor = executor.env(key, value);
         }
 
-        let (status, attempts) = execute_with_retries(
-            &executor,
-            step.retries,
-            Duration::from_secs(step.retry_delay as u64),
-        )
-        .await;
-        Ok((status, attempts))
+        Ok(executor.execute().await)
     }
 
     async fn run_claude_step(
         &self,
         step: &Step,
         ctx: &ExecutionContext,
-    ) -> Result<(StepExecutionStatus, u32), ZekError> {
+    ) -> Result<StepExecutionStatus, ZekError> {
         let prompt = step.prompt.as_deref().unwrap_or_default();
         let rendered = ctx.render(prompt)?;
 
@@ -524,18 +591,20 @@ impl<'a> FlowRunner<'a> {
         };
         let status = self.claude.run(&rendered, &opts).await;
 
-        if let Some(sid) = extract_session_id(status.stdout()) {
-            *self.claude_session.lock().unwrap() = Some(sid);
+        if status.is_success() {
+            if let Some(sid) = extract_session_id(status.stdout()) {
+                *self.claude_session.lock().unwrap() = Some(sid);
+            }
         }
 
-        Ok((status, 1))
+        Ok(status)
     }
 
     async fn run_opencode_step(
         &self,
         step: &Step,
         ctx: &ExecutionContext,
-    ) -> Result<(StepExecutionStatus, u32), ZekError> {
+    ) -> Result<StepExecutionStatus, ZekError> {
         let prompt = step.prompt.as_deref().unwrap_or_default();
         let rendered = ctx.render(prompt)?;
 
@@ -557,14 +626,17 @@ impl<'a> FlowRunner<'a> {
         };
         let status = self.opencode.run(&rendered, &opts).await;
 
-        if let Some(sid) = extract_opencode_session_id(status.stdout()) {
-            *self.opencode_session.lock().unwrap() = Some(sid);
+        if status.is_success() {
+            if let Some(sid) = extract_opencode_session_id(status.stdout()) {
+                *self.opencode_session.lock().unwrap() = Some(sid);
+            }
         }
 
-        Ok((status, 1))
+        Ok(status)
     }
 }
 
+#[derive(Clone)]
 enum MainOutcome {
     NaturalEnd,
     End(String),

@@ -16,7 +16,7 @@ pub struct SerializedStepResult {
 }
 
 /// Contexto compartido entre todos los steps de un flujo.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ExecutionContext {
     results: HashMap<String, SerializedStepResult>,
     /// Orden de grabación, para reportar pasos fallidos de forma determinista.
@@ -29,6 +29,8 @@ pub struct ExecutionContext {
     targeted: HashSet<String>,
     /// Argumentos pasados por CLI (accesibles como `{{args.<clave>}}`).
     args: HashMap<String, String>,
+    /// Pila de invocaciones activa, independiente de los saltos `goto`.
+    pub(crate) flow_stack: Vec<String>,
 }
 
 impl ExecutionContext {
@@ -95,7 +97,8 @@ impl ExecutionContext {
     /// Renderiza un template con handlebars, exponiendo `{{steps.<name>.<campo>}}`
     /// y `{{flow.<campo>}}`. Las variables faltantes se resuelven a cadena vacía.
     pub fn render(&self, template: &str) -> Result<String, ZekError> {
-        let handlebars = Handlebars::new();
+        let mut handlebars = Handlebars::new();
+        handlebars.register_escape_fn(handlebars::no_escape);
         let data = self.as_json_value();
         handlebars
             .render_template(template, &data)

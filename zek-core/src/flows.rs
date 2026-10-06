@@ -243,6 +243,13 @@ impl Flow {
                 crate::t!(val_parallel_action, step.name),
             ));
         }
+        if step.step_type == StepType::Flow {
+            return Err(ZekError::validation(
+                path,
+                li.line_of(&step.name),
+                crate::t!(val_parallel_flow, step.name),
+            ));
+        }
         Ok(())
     }
 
@@ -325,7 +332,40 @@ pub fn load_all(dir: &Path) -> Result<HashMap<String, LoadedFlow>, ZekError> {
             },
         );
     }
+    validate_flow_cycles(&flows)?;
     Ok(flows)
+}
+
+/// Valida las referencias entre flujos, incluyendo los bloques `finally`.
+/// Las referencias ausentes se siguen reportando por separado como warnings.
+pub fn validate_flow_cycles(flows: &HashMap<String, LoadedFlow>) -> Result<(), ZekError> {
+    let mut names: Vec<&String> = flows.keys().collect();
+    names.sort();
+    let index: HashMap<&str, usize> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.as_str(), i))
+        .collect();
+    let graph: Vec<Vec<usize>> = names
+        .iter()
+        .map(|name| {
+            flows[*name]
+                .flow
+                .referenced_flows()
+                .iter()
+                .filter_map(|target| index.get(target.as_str()).copied())
+                .collect()
+        })
+        .collect();
+    if let Some(cycle) = detect_cycles(&graph).first() {
+        let participants: Vec<&str> = cycle.iter().map(|&i| names[i].as_str()).collect();
+        return Err(ZekError::validation(
+            &flows[names[cycle[0]]].source,
+            0,
+            crate::t!(val_flow_recursive, participants.join(", ")),
+        ));
+    }
+    Ok(())
 }
 
 /// Detección de ciclos con el algoritmo de Tarjan (componentes fuertemente conexas).
@@ -393,7 +433,7 @@ impl<'a> Tarjan<'a> {
                     break;
                 }
             }
-            if scc.len() > 1 {
+            if scc.len() > 1 || self.graph[v].contains(&v) {
                 self.cycles.push(scc);
             }
         }

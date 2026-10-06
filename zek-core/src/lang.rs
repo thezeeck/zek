@@ -80,6 +80,8 @@ pub struct Messages {
     pub val_flow_not_found: &'static str,
     pub val_parallel_flow: &'static str,
     pub val_flow_ref_missing: &'static str,
+    pub val_flow_recursive: &'static str,
+    pub val_flow_depth: &'static str,
     pub val_parallel_action: &'static str,
 
     // Razones de salida de ejecución.
@@ -198,6 +200,8 @@ pub const EN: Messages = Messages {
     val_flow_no_catalog: "flow step '{}' requires loaded flows",
     val_flow_not_found: "flow step '{}' references unknown flow '{}'",
     val_parallel_flow: "flow step '{}' cannot run in parallel",
+    val_flow_recursive: "recursive flow references: {}",
+    val_flow_depth: "maximum flow nesting depth exceeded ({})",
     val_flow_ref_missing: "step references flow '{}' which does not exist",
     val_parallel_action: "parallel step '{}' cannot set on_error/on_success",
 
@@ -316,6 +320,8 @@ pub const ES: Messages = Messages {
     val_flow_no_catalog: "el step flow '{}' requiere flujos cargados",
     val_flow_not_found: "el step flow '{}' referencia un flujo inexistente '{}'",
     val_parallel_flow: "el step flow '{}' no puede correr en paralelo",
+    val_flow_recursive: "referencias recursivas entre flujos: {}",
+    val_flow_depth: "se excedió la profundidad máxima de flujos ({})",
     val_flow_ref_missing: "el step referencia el flujo '{}' que no existe",
     val_parallel_action: "el step paralelo '{}' no puede definir on_error/on_success",
 

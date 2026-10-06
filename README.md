@@ -2,6 +2,8 @@
 
 Command flow orchestrator for the terminal, written in Rust. Executes commands defined in YAML, chains them into flows with retries and error handling, and integrates with **Claude** (`claude -p`) and **OpenCode** (`opencode run`) for diagnostic steps and summaries.
 
+Package guides: [zek-cli](zek-cli/README.md) for terminal usage and [zek-core](zek-core/README.md) for Rust integration.
+
 ## Installation
 
 ```bash
@@ -144,7 +146,7 @@ finally:
 |-------|------|---------|-------------|
 | `name` | string | required | Unique name within the flow |
 | `type` | enum | required | `command`, `claude`, `opencode`, or `flow` |
-| `retries` | u32 | 0 | Retry attempts before considering the step failed |
+| `retries` | u32 | 0 | Additional attempts for command, Claude, OpenCode, and flow steps |
 | `retry_delay` | u32 | 0 | Seconds between retries |
 | `on_error` | enum | `stop` | `stop`, `continue`, or `goto:<name>` |
 | `on_success` | enum | `continue` | `continue`, `end`, or `goto:<name>` |
@@ -167,6 +169,12 @@ finally:
 ### Templating
 
 Prompts and commands use [Handlebars](https://handlebarsjs.com/). Available placeholders include `{{steps.<name>.<field>}}` (with `status`, `stdout`, `stderr`, `exit_code`, `attempts`), `{{args.<key>}}` (arguments passed via CLI), and, inside `finally`, `{{flow.<field>}}` (with `status`, `failed_steps`, and `exit_reason`). Missing variables resolve to an empty string.
+
+Placeholder values are inserted literally, without HTML escaping. Commands still run through the shell, so use shell quoting appropriate to the values you pass.
+
+`retries` and `retry_delay` apply to all step types. Process failures and timeouts can be retried; configuration and template errors are returned immediately after attempting `finally`. Retrying a flow reruns its main steps and cleanup, starting from the parent's original context; external effects from earlier attempts are not undone.
+
+Step timeouts cover both the process and output capture. On timeout or cancellation, zek terminates the managed process group on Unix or job on Windows and closes the output readers. `confirm: true` steps are skipped when interactive confirmation is unavailable; library callers must supply an approving confirmation callback.
 
 ### Conditionals (`when`)
 
@@ -207,6 +215,8 @@ DEPLOY_TOKEN=secret zek deploy
 ### Flow Composition (`type: flow`)
 
 A `type: flow` step invokes another flow as a subroutine. Its steps are registered in the same context, allowing you to reference their results using `{{steps.<name>.<field>}}`:
+
+Recursive references, including those in `finally`, are rejected when the catalog is loaded. Runtime invocation also checks for recursion and limits nesting to 16 active flows. Sequential calls to the same flow are allowed.
 
 ```yaml
 # flows/ci.yaml
@@ -285,20 +295,3 @@ zek <flow> --key value      # arguments accessible as {{args.key}}
 Global flags: `--dry-run`, `--verbose/-v`, `--debug`, `--timeout-global <sec>`, `--log <file>` (saves execution log), and `--report <json|markdown>` (exports a report to stdout instead of summary). Global flags must precede the flow/command name: `zek --log run.log deploy` or `zek --report json deploy > report.json`.
 
 Exit codes: `0` success, `2` failed, `3` aborted (infinite loop detected).
-
-## Development
-
-```bash
-cargo build --workspace
-cargo test --workspace
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo fmt --all -- --check
-```
-
-## Release
-
-Tagging a release triggers the `.github/workflows/release.yml` workflow (cargo-dist), generating multi-OS binaries, installers, and a GitHub Release:
-
-```bash
-git tag v0.1.0 && git push origin v0.1.0
-```
