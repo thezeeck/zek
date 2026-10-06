@@ -42,6 +42,14 @@ struct Cli {
     #[arg(long = "var", value_name = "KEY=VALUE")]
     vars: Vec<String>,
 
+    /// Execute only this main step (requires available inputs)
+    #[arg(long, conflicts_with = "until")]
+    step: Option<String>,
+
+    /// Execute through this step (includes DAG ancestors)
+    #[arg(long, conflicts_with = "step")]
+    until: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -50,6 +58,12 @@ struct Cli {
 enum ReportFormat {
     Json,
     Markdown,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum GraphFormat {
+    Text,
+    Mermaid,
 }
 
 #[derive(Subcommand)]
@@ -70,6 +84,39 @@ enum Command {
     Commands {
         /// Command name
         name: String,
+    },
+    /// Display a flow graph without executing commands
+    Graph {
+        name: String,
+        #[arg(long, value_enum, default_value = "text")]
+        format: GraphFormat,
+    },
+    /// List recorded flow executions
+    History {
+        #[arg(long)]
+        flow: Option<String>,
+        #[arg(long, value_parser = ["success", "failed", "aborted", "error", "cancelled", "running", "incomplete"])]
+        status: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read structured events for a recorded execution
+    Logs { run_id: String },
+    /// Rerun a flow when project files change
+    Watch {
+        name: String,
+        #[arg(long = "include")]
+        include: Vec<String>,
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+        #[arg(long, default_value_t = 300)]
+        debounce_ms: u64,
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u64).range(1..))]
+        interval_ms: u64,
+        #[arg(last = true)]
+        args: Vec<String>,
     },
     /// Ask Claude something outside of flows
     Ask {
@@ -119,10 +166,28 @@ async fn run(cli: Cli) -> Result<i32> {
     if let Ok(config) = zek_core::config::Config::load() {
         zek_core::lang::set(config.language);
     }
-    if !cli.vars.is_empty() && !matches!(&cli.command, Some(Command::Run(_))) {
+    if !cli.vars.is_empty()
+        && !matches!(
+            &cli.command,
+            Some(Command::Run(_)) | Some(Command::Watch { .. })
+        )
+    {
         bail!(zek_core::lang::messages().err_vars_require_flow);
     }
 
+    let selection = match (cli.step, cli.until) {
+        (Some(name), None) => zek_core::plan::Selection::Step(name),
+        (None, Some(name)) => zek_core::plan::Selection::Until(name),
+        _ => zek_core::plan::Selection::All,
+    };
+    if selection != zek_core::plan::Selection::All
+        && !matches!(
+            &cli.command,
+            Some(Command::Run(_)) | Some(Command::Graph { .. }) | Some(Command::Watch { .. })
+        )
+    {
+        bail!(zek_core::lang::messages().err_selection_flow);
+    }
     match cli.command {
         Some(Command::Init { dir }) => {
             commands::init(dir)?;
@@ -154,6 +219,59 @@ async fn run(cli: Cli) -> Result<i32> {
             commands::show_command(&name)?;
             Ok(0)
         }
+        Some(Command::Graph { name, format }) => {
+            commands::graph(&name, matches!(format, GraphFormat::Mermaid), &selection)?;
+            Ok(0)
+        }
+        Some(Command::History {
+            flow,
+            status,
+            limit,
+            json,
+        }) => {
+            commands::history(flow.as_deref(), status.as_deref(), limit, json)?;
+            Ok(0)
+        }
+        Some(Command::Logs { run_id }) => {
+            commands::logs(&run_id)?;
+            Ok(0)
+        }
+        Some(Command::Watch {
+            name,
+            include,
+            exclude,
+            debounce_ms,
+            interval_ms,
+            args,
+        }) => {
+            if cli.dry_run {
+                bail!("{}", zek_core::lang::messages().err_watch_dry_run);
+            }
+            let options = zek_core::watch::WatchOptions {
+                include: if include.is_empty() {
+                    vec!["**".into()]
+                } else {
+                    include
+                },
+                exclude,
+                debounce: std::time::Duration::from_millis(debounce_ms),
+                ..Default::default()
+            };
+            commands::watch(
+                &name,
+                &args,
+                &cli.vars,
+                selection,
+                options,
+                interval_ms,
+                cli.verbose,
+                cli.debug,
+                cli.timeout_global,
+                cli.log,
+                cli.report,
+            )
+            .await
+        }
         Some(Command::Ask { message }) => {
             commands::ask(&message).await?;
             Ok(0)
@@ -178,6 +296,8 @@ async fn run(cli: Cli) -> Result<i32> {
                 &name,
                 &rest,
                 &cli.vars,
+                selection,
+                false,
                 cli.dry_run,
                 cli.verbose,
                 cli.debug,

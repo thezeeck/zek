@@ -1,6 +1,6 @@
 # Plan de ejecución de zek
 
-Convertir las doce propuestas del roadmap en entregas verificables, manteniendo la compatibilidad de los flujos existentes. La base de este plan es el código de la versión **0.2.1**.
+Convertir las doce propuestas del roadmap en entregas verificables, manteniendo la compatibilidad de los flujos existentes. La base de este plan es el código de la versión **0.2.2**.
 
 Las tareas marcadas como pendientes describen funcionalidades por implementar. Sus nombres de campos y opciones son contratos propuestos que deben quedar definidos antes de programar cada entrega. Las entregas implementadas registran abajo su contrato y validación.
 
@@ -8,7 +8,7 @@ Las tareas marcadas como pendientes describen funcionalidades por implementar. S
 
 El proyecto ya incluye comandos reutilizables, flujos secuenciales, grupos `parallel: true`, condiciones, `goto`, subflujos, confirmación, reintentos con demora fija y bloques `finally`. También dispone de integración con Claude y OpenCode, argumentos `{{args.*}}`, configuración por proyecto, reportes JSON/Markdown y logs de texto mediante `--log`.
 
-Estos mecanismos se reutilizan. El historial necesita persistencia estructurada; el parser JSON actual no expone campos de salida de comandos en el contexto; el paralelismo actual depende de grupos consecutivos, sin un grafo de dependencias.
+Estos mecanismos se reutilizan. El historial necesita persistencia estructurada; el parser JSON actual no expone campos de salida de comandos en el contexto; la fase 2 añade un grafo de dependencias opcional, conservando los grupos paralelos secuenciales.
 
 ## Orden y dependencias
 
@@ -20,11 +20,11 @@ Seguir el orden de la tabla para una ejecución con un solo responsable. Las dep
 | P02 | Salida JSON de comandos en el contexto | — | Pendiente |
 | P03 | Reintentos con backoff exponencial | — | Pendiente |
 | P04 | Archivos de entorno y gestores de secretos | — | Pendiente |
-| P05 | Ejecución por dependencias con `needs` | — | Pendiente |
-| P06 | Visualización con `zek graph` | P05 | Pendiente |
-| P07 | Ejecución parcial con `--step` y `--until` | P05, P06 | Pendiente |
-| P08 | Historial estructurado y consulta de logs | — | Pendiente |
-| P09 | Reejecución con `zek watch` | P08 | Pendiente |
+| P05 | Ejecución por dependencias con `needs` | — | Implementado; revisión pendiente |
+| P06 | Visualización con `zek graph` | P05 | Implementado; revisión pendiente |
+| P07 | Ejecución parcial con `--step` y `--until` | P05, P06 | Implementado; revisión pendiente |
+| P08 | Historial estructurado y consulta de logs | — | Implementado; revisión pendiente |
+| P09 | Reejecución con `zek watch` | P08 | Implementado; revisión pendiente |
 | P10 | Caché de pasos por entradas declaradas | P01, P02, P04, P05, P08 | Pendiente |
 | P11 | Notificaciones de finalización | P08 | Pendiente |
 | P12 | Exportación a GitHub Actions | P04, P05, P06, P10 | Pendiente |
@@ -92,71 +92,95 @@ Cada tarea debe tener un responsable asignado al iniciarse y dividirse en PRs re
 
 ### P05 — Dependencias declaradas y ejecución del grafo
 
+**Responsable:** Codex. **Estado:** implementado; revisión y registro de PR pendientes.
+
+**Contrato implementado:** `execution: sequential` por defecto; `execution: dag` explícito; `max_concurrency: 4` por defecto, entero positivo y límite por DAG. `needs` solo en pasos principales DAG y exige éxito. Los subflujos reciben snapshots separados; resultados internos publicados como `paso-padre::paso-hijo`. `stop` y `end` esperan lo activo antes de limpieza; errores internos conservan el mismo cierre. Los saltos por dependencias quedan registrados en `skip_reasons`.
+
 **Resultado:** `needs: [build, test]` determina cuándo puede empezar un paso y permite ejecutar ramas independientes en paralelo.
 
 **Archivos:** `zek-core/src/flows.rs`, `step.rs`, `execution.rs`; nuevo módulo de planificación; vista previa en `zek-cli/src/commands.rs`.
 
-- [ ] **PR 1:** introducir un modo explícito `execution: dag`, manteniendo la ejecución secuencial como valor por defecto. Validar referencias, ciclos y dependencias de un paso hacia sí mismo.
-- [ ] Construir un plan compartido por el motor, `--dry-run`, el grafo y la selección parcial. Definir un límite configurable de concurrencia.
-- [ ] **PR 2:** ejecutar pasos listos, publicar resultados antes de habilitar dependientes y propagar estados de fallo o salto. Por defecto, `needs` exige dependencias exitosas.
-- [ ] Definir `on_error: stop` como detención del arranque de nuevos pasos; esperar los ya activos dentro de sus límites y ejecutar `finally` al cerrar el bloque principal. `continue` permite seguir con ramas independientes.
-- [ ] En el modo DAG inicial, rechazar `parallel: true`, `goto` y `entry_only_via_goto`; conservarlos en modo secuencial. Mantener `finally` secuencial y habilitar subflujos sin compartir resultados mutables entre ramas activas.
+- [x] **Parte 1:** introducir un modo explícito `execution: dag`, manteniendo la ejecución secuencial como valor por defecto. Validar referencias, ciclos y dependencias de un paso hacia sí mismo.
+- [x] Construir un plan compartido por el motor, `--dry-run`, el grafo y la selección parcial. Definir un límite configurable de concurrencia.
+- [x] **Parte 2:** ejecutar pasos listos, publicar resultados antes de habilitar dependientes y propagar estados de fallo o salto. Por defecto, `needs` exige dependencias exitosas.
+- [x] Definir `on_error: stop` como detención del arranque de nuevos pasos; esperar los ya activos dentro de sus límites y ejecutar `finally` al cerrar el bloque principal. `continue` permite seguir con ramas independientes.
+- [x] En el modo DAG inicial, rechazar `parallel: true`, `goto` y `entry_only_via_goto`; conservarlos en modo secuencial. Mantener `finally` secuencial y habilitar subflujos sin compartir resultados mutables entre ramas activas.
 
 **Aceptación:** un grafo en diamante ejecuta cada paso una vez; ramas independientes se solapan y respetan el límite; dependientes de pasos fallidos o saltados quedan identificados; ciclos fallan antes de lanzar procesos; fixtures secuenciales y limpieza conservan su comportamiento.
 
 ### P06 — Visualización del flujo
 
+**Responsable:** Codex. **Estado:** implementado; revisión y registro de PR pendientes.
+
+**Contrato implementado:** `zek graph <flujo> --format text|mermaid`, texto por defecto. `ExecutionPlan` genera ambas vistas; `--dry-run` usa la misma vista de texto. Los grafos conservan orden de declaración y escapan etiquetas; los comandos y prompts no se evalúan ni ejecutan.
+
 **Resultado:** `zek graph <flujo>` muestra relaciones sin ejecutar comandos.
 
 **Archivos:** módulo de planificación de P05; `zek-cli/src/main.rs`, `commands.rs`.
 
-- [ ] Producir una vista de texto y una exportación Mermaid a partir del plan compartido.
-- [ ] En modo DAG, dibujar las dependencias; en modo secuencial, representar orden, grupos paralelos y saltos condicionales. Identificar subflujos y `finally`.
-- [ ] Etiquetar por separado las aristas de `goto`: un flujo secuencial con saltos puede contener ciclos y no es un DAG.
+- [x] Producir una vista de texto y una exportación Mermaid a partir del plan compartido.
+- [x] En modo DAG, dibujar las dependencias; en modo secuencial, representar orden, grupos paralelos y saltos condicionales. Identificar subflujos y `finally`.
+- [x] Etiquetar por separado las aristas de `goto`: un flujo secuencial con saltos puede contener ciclos y no es un DAG.
 
 **Aceptación:** salidas deterministas para los fixtures de ambos modos, nombres escapados correctamente y ningún proceso o proveedor de secretos invocado al visualizar.
 
 ### P07 — Ejecución parcial
 
+**Responsable:** Codex. **Estado:** implementado; revisión y registro de PR pendientes.
+
+**Contrato implementado:** `--step` y `--until` antes del nombre del flujo, mutuamente excluyentes. Se validan nombres, requisitos, saltos y referencias Handlebars de comandos reutilizables, subflujos y limpieza antes de ejecutar. Los accesos dinámicos al objeto completo `steps` se rechazan al seleccionar porque sus entradas no pueden determinarse estáticamente. `excluded_steps` separa exclusiones de selección de `skipped_steps`; `skip_reasons` precisa las causas de saltos.
+
 **Resultado:** depurar un paso o ejecutar hasta un punto definido mediante `zek --step <nombre> <flujo>` y `zek --until <nombre> <flujo>`.
 
 **Archivos:** planificación y ejecución en `zek-core`; argumentos y vista previa en `zek-cli`.
 
-- [ ] Definir `--step` como ejecución exclusiva del paso indicado; rechazar antes de ejecutar si necesita resultados previos que no están disponibles.
-- [ ] Definir `--until` como prefijo inclusivo en modo secuencial y como conjunto de ancestros más el destino en modo DAG. Rechazar saltos que salgan del conjunto seleccionado.
-- [ ] Validar nombres inexistentes y opciones incompatibles. Aplicar la selección al bloque principal y conservar el bloque `finally` del flujo.
-- [ ] Mostrar la selección real con `--dry-run` y distinguir los pasos excluidos de los saltados por condiciones en el reporte.
+- [x] Definir `--step` como ejecución exclusiva del paso indicado; rechazar antes de ejecutar si necesita resultados previos que no están disponibles.
+- [x] Definir `--until` como prefijo inclusivo en modo secuencial y como conjunto de ancestros más el destino en modo DAG. Rechazar saltos que salgan del conjunto seleccionado.
+- [x] Validar nombres inexistentes y opciones incompatibles. Aplicar la selección al bloque principal y conservar el bloque `finally` del flujo.
+- [x] Mostrar la selección real con `--dry-run` y distinguir los pasos excluidos de los saltados por condiciones en el reporte.
 
 **Aceptación:** no se ejecutan pasos fuera de la selección; errores de selección se detectan antes de lanzar procesos; las dependencias elegidas y la limpieza se verifican con pruebas de integración de CLI.
 
 **Salida de fase:** motor, vista previa, visualización y ejecución parcial utilizan el mismo plan; el YAML anterior no requiere migración.
 
+**Validación de fase:** 179 pruebas del workspace aprobadas en Linux, incluidas 25 nuevas de esta fase. Build, Clippy con advertencias como errores y formato aprobados. Pruebas nuevas en `zek-core/tests/test_plan.rs` y `zek-cli/tests/test_planning.rs`: diamante, solapamiento real de procesos, límite de concurrencia, fallos/saltos transitivos, cierre con tareas activas, errores internos y limpieza, aislamiento de subflujos, escapes Mermaid, selección y referencias previas, reportes y diagnósticos en ambos idiomas. CI Windows incorpora las pruebas de planificación independientes de plataforma. Pendiente ejecutar CI en Windows y registrar los PR de revisión.
+
 ## Fase 3: historial y ciclo de desarrollo
 
 ### P08 — Historial y logs consultables
+
+**Responsable:** Codex. **Estado:** implementado; revisión y registro de PR pendientes.
+
+**Contrato implementado:** eventos JSONL versión 1 con ID aislado por corrida, secuencia, tiempos, scope de flujo, paso, intento, estado, motivo y salida numérica cuando aplica. Resumen por corrida y recuperación desde eventos legibles si está incompleto. `zek history --flow --status --limit --json` y `zek logs <run-id>`. Directorio global por defecto `<config>/history`; `history.directory`, `retention_days: 30`, `max_runs: 1000` configurables. Retención solo sobre corridas terminadas y completas, antes de iniciar o consultar historial; cero desactiva ese límite. Reportes exponen `run_id`. Se conserva `--log`; el historial omite prompts, argumentos, variables, entorno y stdout/stderr. P04 sigue pendiente: cualquier payload nuevo de proveedores deberá redactarse antes de persistirlo.
 
 **Resultado:** `zek history` lista ejecuciones y `zek logs <run-id>` recupera los eventos de una ejecución concreta.
 
 **Archivos:** nuevo módulo de eventos y persistencia en `zek-core`; `zek-cli/src/main.rs`, `commands.rs`, `config.rs`.
 
-- [ ] Definir eventos versionados con ID de ejecución, flujo, paso, intento, tiempos y estado; incluir finalización, errores internos y cancelaciones.
-- [ ] Persistir eventos estructurados y un resumen por ejecución en un directorio configurable. Mantener compatible el log de texto de `--log`.
-- [ ] Implementar consulta por flujo y estado, límite de resultados, lectura de logs y una política explícita de retención.
+- [x] Definir eventos versionados con ID de ejecución, flujo, paso, intento, tiempos y estado; incluir finalización, errores internos y cancelaciones.
+- [x] Persistir eventos estructurados y un resumen por ejecución en un directorio configurable. Mantener compatible el log de texto de `--log`.
+- [x] Implementar consulta por flujo y estado, límite de resultados, lectura de logs y una política explícita de retención.
 
 **Aceptación:** dos ejecuciones concurrentes no mezclan eventos; un registro incompleto sigue siendo consultable; IDs y orden son deterministas dentro de cada ejecución; valores de secretos no quedan persistidos cuando se integra P04.
 
 ### P09 — Modo watch
 
+**Responsable:** Codex. **Estado:** implementado; revisión y registro de PR pendientes.
+
+**Contrato implementado:** `zek watch <flujo>` ejecuta una corrida inicial y sondea contenido cada 100 ms; `--interval-ms`, `--debounce-ms` (300 por defecto), `--include` y `--exclude` configurables. Patrones `*`, `?`, `**` y `**/` con `/` en todas las plataformas. Excluye `target`, `.git`, `.zek`, historial, logs y caché, archivos `.log`, ubicación de historial configurada y `--log`; no sigue symlinks. Una corrida a la vez y un único pendiente acumulado durante ejecución. Recarga YAML/configuración por corrida; un error queda registrado y no cierra el observador. Ctrl+C cancela procesos, registra cancelación y sale con 130 sin lanzar corridas pendientes; como en la cancelación existente, no ejecuta `finally` asíncrono. La raíz observada queda fijada al workdir inicial.
+
 **Resultado:** `zek watch <flujo>` reejecuta el flujo ante cambios relevantes de archivos.
 
 **Archivos:** nuevo módulo de observación; CLI y eventos de P08.
 
-- [ ] Añadir patrones de inclusión/exclusión y debounce configurable; excluir por defecto `target/`, historial, logs y caché para evitar reejecuciones causadas por zek.
-- [ ] Ejecutar una corrida a la vez. Si llegan cambios mientras corre, acumular una única reejecución al terminar.
-- [ ] Recargar y validar definiciones antes de cada corrida; mantener el observador activo ante un YAML inválido y registrar cada corrida en el historial.
-- [ ] Manejar interrupción del usuario y cierre de procesos sin dejar nuevas corridas pendientes.
+- [x] Añadir patrones de inclusión/exclusión y debounce configurable; excluir por defecto `target/`, historial, logs y caché para evitar reejecuciones causadas por zek.
+- [x] Ejecutar una corrida a la vez. Si llegan cambios mientras corre, acumular una única reejecución al terminar.
+- [x] Recargar y validar definiciones antes de cada corrida; mantener el observador activo ante un YAML inválido y registrar cada corrida en el historial.
+- [x] Manejar interrupción del usuario y cierre de procesos sin dejar nuevas corridas pendientes.
 
 **Aceptación:** cambios agrupados generan una sola corrida; un cambio durante la ejecución genera exactamente una corrida posterior; archivos excluidos no disparan ejecuciones; hay pruebas del observador en las plataformas soportadas.
+
+**Validación de fase:** 197 pruebas del workspace aprobadas en Linux, incluidas 18 nuevas de esta fase. Build, Clippy con advertencias como errores y formato aprobados. Pruebas de aislamiento concurrente, orden y recuperación de eventos, cancelación, retención, reintentos, configuración, patrones y debounce independientes de SO; integración CLI para consultas, filtros, recuperación de YAML, acumulación de cambios y Ctrl+C. La prueba real de SIGINT debe ejecutarse fuera del sandbox que intercepta señales. CI Windows incorpora pruebas de historial y observación independientes de plataforma; su ejecución y los PR de revisión quedan pendientes.
 
 ## Fase 4: reutilización de resultados
 
@@ -219,4 +243,4 @@ cargo fmt --all -- --check
 
 ## Siguiente paso
 
-Revisar los cambios de **P01** y registrar su PR. La siguiente implementación es **P02**: definir el resultado JSON opcional, exponer `{{steps.nombre.json.campo}}` y conectar errores de parseo con los reintentos y reportes existentes.
+Revisar los cambios implementados de **P01 y P05–P07** y registrar sus PR. La **fase 3 (P08–P09)** está implementada y también requiere revisión/registro de PR. La fase 4 continúa con **P10**, que depende de **P02, P04** y otros módulos ya implementados; **P02–P04** siguen pendientes y deben priorizarse antes de cerrar esas dependencias.

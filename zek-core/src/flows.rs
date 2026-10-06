@@ -31,6 +31,12 @@ pub struct Finally {
 /// Flujo definido en `flows/*.yaml`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Flow {
+    #[serde(default)]
+    pub execution: crate::plan::ExecutionMode,
+
+    #[serde(default = "crate::plan::default_concurrency")]
+    pub max_concurrency: usize,
+
     pub name: String,
 
     #[serde(default)]
@@ -227,6 +233,8 @@ impl Flow {
         self.collect_dead_steps(&self.steps, &mut warnings);
         self.collect_static_cycles(&self.steps, &mut warnings);
 
+        crate::plan::ExecutionPlan::build(self, &crate::plan::Selection::All)
+            .map_err(|error| ZekError::validation(path, 0, error.to_string()))?;
         Ok(warnings)
     }
 

@@ -17,7 +17,7 @@ use zek_core::config::{
 use zek_core::error::{FlowFinalStatus, ZekError};
 use zek_core::exec::CommandExecutor;
 use zek_core::execution::{FlowReport, FlowRunner, StepProgress};
-use zek_core::flows::{self as core_flows, Flow, LoadedFlow};
+use zek_core::flows::{self as core_flows, LoadedFlow};
 use zek_core::lang::{self, Language};
 use zek_core::step::StepType;
 use zek_core::t;
@@ -214,6 +214,8 @@ pub async fn run_by_name(
     name: &str,
     args: &[String],
     vars: &[String],
+    selection: zek_core::plan::Selection,
+    flow_only: bool,
     dry_run: bool,
     verbose: bool,
     debug: bool,
@@ -223,9 +225,23 @@ pub async fn run_by_name(
 ) -> Result<i32> {
     let config = ensure_config()?;
     let vars = parse_vars(vars)?;
-    let commands = core_commands::load_all(&config.commands_dir())?;
-    let flows = core_flows::load_all(&config.flows_dir())?;
+    let catalogs = (|| -> Result<_> {
+        Ok((
+            core_commands::load_all(&config.commands_dir())?,
+            core_flows::load_all(&config.flows_dir())?,
+        ))
+    })();
+    let (commands, flows) = match catalogs {
+        Ok(catalogs) => catalogs,
+        Err(error) => {
+            if !dry_run {
+                record_preflight_error(&config, name)?;
+            }
+            return Err(error);
+        }
+    };
     let opts = RunOptions {
+        selection,
         dry_run,
         verbose,
         debug,
@@ -238,7 +254,14 @@ pub async fn run_by_name(
     if let Some(loaded) = flows.get(name) {
         return run_flow(&config, &commands, &flows, loaded, args, &opts).await;
     }
+    if flow_only {
+        record_preflight_error(&config, name)?;
+        bail!("{}", t!(err_watch_flow, name));
+    }
     if let Some(loaded) = commands.get(name) {
+        if opts.selection != zek_core::plan::Selection::All {
+            bail!(zek_core::lang::messages().err_selection_flow);
+        }
         if !opts.vars.is_empty() {
             bail!("{}", lang::messages().err_vars_require_flow);
         }
@@ -248,6 +271,7 @@ pub async fn run_by_name(
 }
 
 struct RunOptions {
+    selection: zek_core::plan::Selection,
     dry_run: bool,
     verbose: bool,
     debug: bool,
@@ -274,8 +298,21 @@ async fn run_flow(
         eprintln!("{}", t!(warning_at, warning, loaded.source.display()));
     }
 
+    let plan = match (|| -> Result<_> {
+        let plan = zek_core::plan::ExecutionPlan::build(flow, &opts.selection)?;
+        plan.validate_catalog_inputs(flow, commands, flows)?;
+        Ok(plan)
+    })() {
+        Ok(plan) => plan,
+        Err(error) => {
+            if !opts.dry_run {
+                record_preflight_error(config, &flow.name)?;
+            }
+            return Err(error);
+        }
+    };
     if opts.dry_run {
-        print_plan(flow);
+        print!("{}", plan.graph(flow, false));
         return Ok(0);
     }
 
@@ -286,8 +323,11 @@ async fn run_flow(
 
     let progress_logger = logger.clone();
     let stream = opts.report.is_none();
+    let history = config.history_store()?.start(&flow.name)?;
     let runner = FlowRunner::new(flow, commands, config.workdir.clone(), stream)
         .with_flows(flows)
+        .with_history_run(history.clone())
+        .with_selection(opts.selection.clone())
         .with_args(params)
         .with_vars(opts.vars.clone())
         .on_progress(Arc::new(move |p| {
@@ -296,13 +336,31 @@ async fn run_flow(
         }))
         .on_confirm(Arc::new(confirm_step));
 
-    let run_future = runner.run();
-    let report = match opts.timeout_global {
-        Some(secs) => match tokio::time::timeout(Duration::from_secs(secs), run_future).await {
-            Ok(res) => res?,
-            Err(_) => bail!("{}", t!(err_timeout_exceeded, secs)),
-        },
-        None => run_future.await?,
+    let work = async {
+        match opts.timeout_global {
+            Some(secs) => match tokio::time::timeout(Duration::from_secs(secs), runner.run()).await
+            {
+                Ok(result) => Ok(result?),
+                Err(_) => {
+                    history.event(
+                        &flow.name,
+                        None,
+                        None,
+                        "global_timeout",
+                        Some("aborted"),
+                        None,
+                        None,
+                    )?;
+                    history.finish("aborted", None)?;
+                    bail!("{}", t!(err_timeout_exceeded, secs));
+                }
+            },
+            None => Ok(runner.run().await?),
+        }
+    };
+    let report = tokio::select! {
+        signal = tokio::signal::ctrl_c() => {signal?; history.finish("cancelled",None)?; logger.log("flow cancelled"); return Ok(130);},
+        result = work => result?,
     };
 
     logger.log(&format!(
@@ -398,67 +456,6 @@ fn confirm_step(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn print_plan(flow: &Flow) {
-    println!("{}", t!(plan_label, flow.name).bold());
-    for (i, step) in flow.steps.iter().enumerate() {
-        let detail = match step.step_type {
-            StepType::Command => step
-                .command
-                .as_deref()
-                .unwrap_or(lang::messages().plan_no_command),
-            StepType::Claude | StepType::Opencode => step
-                .prompt
-                .as_deref()
-                .unwrap_or(lang::messages().plan_no_prompt),
-            StepType::Flow => step.flow.as_deref().unwrap_or("?"),
-        };
-        let mut flags = String::new();
-        if step.entry_only_via_goto {
-            flags.push_str(" [entry_only_via_goto]");
-        }
-        if step.parallel {
-            flags.push_str(" [parallel]");
-        }
-        println!(
-            "  {}. {:<20} {:?}{} -> {detail}",
-            i + 1,
-            step.name,
-            step.step_type,
-            flags
-        );
-    }
-    if let Some(fin) = &flow.finally {
-        println!("{}", lang::messages().plan_finally);
-        for (i, step) in fin.steps.iter().enumerate() {
-            let detail = match step.step_type {
-                StepType::Command => step
-                    .command
-                    .as_deref()
-                    .unwrap_or(lang::messages().plan_no_command),
-                StepType::Claude | StepType::Opencode => step
-                    .prompt
-                    .as_deref()
-                    .unwrap_or(lang::messages().plan_no_prompt),
-                StepType::Flow => step.flow.as_deref().unwrap_or("?"),
-            };
-            let mut flags = String::new();
-            if step.entry_only_via_goto {
-                flags.push_str(" [entry_only_via_goto]");
-            }
-            if step.parallel {
-                flags.push_str(" [parallel]");
-            }
-            println!(
-                "    {}. {:<20} {:?}{} -> {detail}",
-                i + 1,
-                step.name,
-                step.step_type,
-                flags
-            );
-        }
-    }
-}
-
 fn print_summary(
     flows: &HashMap<String, LoadedFlow>,
     report: &FlowReport,
@@ -473,6 +470,9 @@ fn print_summary(
 
     println!();
     println!("{}", t!(sum_flow, report.name).bold());
+    if let Some(run_id) = &report.run_id {
+        println!("{}", t!(history_run_id, run_id));
+    }
     println!("{}", t!(sum_status, status_colored));
     println!("{}", t!(sum_exit_code, report.exit_code()));
     println!("{}", t!(sum_duration, format_duration(report.duration)));
@@ -494,6 +494,9 @@ fn print_summary(
             format_duration(result.duration),
             t!(sum_attempts, result.attempts)
         );
+    }
+    for name in &report.excluded_steps {
+        println!("  → {name:<20} (excluded)");
     }
     for name in &report.skipped_steps {
         println!("  {} {name:<20} (skipped)", "→".yellow());
@@ -588,12 +591,15 @@ fn report_json(flows: &HashMap<String, LoadedFlow>, report: &FlowReport) -> serd
 
     serde_json::json!({
         "name": report.name,
+        "run_id": report.run_id,
         "status": report.status.as_str(),
         "exit_code": report.exit_code(),
         "duration_ms": report.duration.as_millis(),
         "exit_reason": report.exit_reason,
         "failed_steps": report.failed_steps,
         "skipped_steps": report.skipped_steps,
+        "excluded_steps": report.excluded_steps,
+        "skip_reasons": report.skip_reasons,
         "steps": steps,
     })
 }
@@ -603,6 +609,9 @@ fn report_markdown(flows: &HashMap<String, LoadedFlow>, report: &FlowReport) -> 
     let mut out = String::new();
 
     out.push_str(&format!("# Flow: {}\n\n", report.name));
+    if let Some(run_id) = &report.run_id {
+        out.push_str(&format!("- **Run ID**: {run_id}\n"));
+    }
     out.push_str(&format!("- **Status**: {}\n", report.status.as_str()));
     out.push_str(&format!("- **Exit code**: {}\n", report.exit_code()));
     out.push_str(&format!(
@@ -624,6 +633,12 @@ fn report_markdown(flows: &HashMap<String, LoadedFlow>, report: &FlowReport) -> 
         ));
     }
 
+    if !report.excluded_steps.is_empty() {
+        out.push_str(&format!(
+            "- **Excluded steps**: {}\n",
+            report.excluded_steps.join(", ")
+        ));
+    }
     out.push_str("\n## Steps\n\n");
     out.push_str("| Step | Type | Status | Exit code | Attempts | Duration |\n");
     out.push_str("|------|------|--------|-----------|----------|----------|\n");
@@ -640,6 +655,9 @@ fn report_markdown(flows: &HashMap<String, LoadedFlow>, report: &FlowReport) -> 
             result.attempts,
             format_duration(result.duration)
         ));
+    }
+    for name in &report.excluded_steps {
+        out.push_str(&format!("| {name} | - | excluded | - | - | - |\n"));
     }
     for name in &report.skipped_steps {
         out.push_str(&format!("| {name} | - | skipped | - | - | - |\n"));
@@ -859,6 +877,147 @@ fn expand_tilde(path: PathBuf) -> Result<PathBuf> {
         return Ok(home_dir()?.join(rest));
     }
     Ok(path)
+}
+
+/// Render only the shared execution plan; never invoke process or AI clients.
+pub fn graph(name: &str, mermaid: bool, selection: &zek_core::plan::Selection) -> Result<()> {
+    let config = ensure_config()?;
+    let flows = core_flows::load_all(&config.flows_dir())?;
+    let commands = core_commands::load_all(&config.commands_dir())?;
+    let loaded = flows
+        .get(name)
+        .ok_or_else(|| anyhow::anyhow!("{}", t!(err_name_not_found, name)))?;
+    let plan = zek_core::plan::ExecutionPlan::build(&loaded.flow, selection)?;
+    plan.validate_catalog_inputs(&loaded.flow, &commands, &flows)?;
+    print!("{}", plan.graph(&loaded.flow, mermaid));
+    Ok(())
+}
+
+fn record_preflight_error(config: &Config, flow: &str) -> Result<()> {
+    let run = config.history_store()?.start(flow)?;
+    run.event(
+        flow,
+        None,
+        None,
+        "internal_error",
+        Some("error"),
+        None,
+        None,
+    )?;
+    run.finish("error", None)?;
+    Ok(())
+}
+
+pub fn history(flow: Option<&str>, status: Option<&str>, limit: usize, json: bool) -> Result<()> {
+    let config = ensure_config()?;
+    let store = config.history_store()?;
+    store.prune()?;
+    let runs = store.list(flow, status, limit)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&runs)?);
+    } else {
+        println!("{}", lang::messages().history_heading);
+        for run in runs {
+            println!(
+                "{}  {}  {}  {}",
+                run.run_id, run.flow, run.status, run.started_at_ms
+            );
+        }
+    }
+    Ok(())
+}
+pub fn logs(id: &str) -> Result<()> {
+    let config = ensure_config()?;
+    for event in config.history_store()?.events(id)? {
+        println!("{}", serde_json::to_string(&event)?);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn watch(
+    name: &str,
+    args: &[String],
+    vars: &[String],
+    selection: zek_core::plan::Selection,
+    mut options: zek_core::watch::WatchOptions,
+    interval_ms: u64,
+    verbose: bool,
+    debug: bool,
+    timeout_global: Option<u64>,
+    log: Option<PathBuf>,
+    report: Option<ReportFormat>,
+) -> Result<i32> {
+    let config = ensure_config()?;
+    options
+        .ignored_paths
+        .push(config.history_store()?.directory);
+    if let Some(log) = &log {
+        options.ignored_paths.push(log.clone());
+    }
+    let mut watcher = zek_core::watch::PollWatcher::new(config.workdir.clone(), options)?;
+    let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let shutdown = tokio::signal::ctrl_c();
+    tokio::pin!(shutdown);
+    eprintln!("{}", t!(watch_started, config.workdir.display()));
+    loop {
+        let setup = match load_effective() {
+            Ok(current) => {
+                watcher.ignore_path(current.history_store()?.directory)?;
+                Ok(())
+            }
+            Err(error) => {
+                record_preflight_error(&config, name)?;
+                Err(anyhow::Error::from(error))
+            }
+        };
+        let work = async {
+            setup?;
+            run_by_name(
+                name,
+                args,
+                vars,
+                selection.clone(),
+                true,
+                false,
+                verbose,
+                debug,
+                timeout_global,
+                log.clone(),
+                report,
+            )
+            .await
+        };
+        tokio::pin!(work);
+        let result = loop {
+            tokio::select! {
+                biased;
+                signal=&mut shutdown => {signal?; return Ok(130);},
+                result=&mut work => break result,
+                _=interval.tick() => { if let Err(error)=watcher.poll(std::time::Instant::now()) {eprintln!("{}",t!(watch_scan_error,error));} }
+            }
+        };
+        match result {
+            Ok(130) => return Ok(130),
+            Err(error) => eprintln!("error: {error:#}"),
+            _ => {}
+        }
+        // Catch changes that arrived after the final poll during execution.
+        if let Err(error) = watcher.poll(std::time::Instant::now()) {
+            eprintln!("{}", t!(watch_scan_error, error));
+        }
+        loop {
+            if watcher.take_ready(std::time::Instant::now()) {
+                break;
+            }
+            tokio::select! {
+                biased;
+                signal=&mut shutdown => {signal?;return Ok(130);},
+                _=interval.tick() => {if let Err(error)=watcher.poll(std::time::Instant::now()) {eprintln!("{}",t!(watch_scan_error,error));}}
+            }
+        }
+    }
 }
 
 #[cfg(test)]

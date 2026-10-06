@@ -153,6 +153,7 @@ finally:
 | `entry_only_via_goto` | bool | false | Only executes if another step targets it via `goto` |
 | `confirm` | bool | false | Asks for confirmation before executing |
 | `when` | string | - | Condition to execute the step (skipped if false) |
+| `needs` | string[] | [] | Successful prerequisites in `execution: dag` |
 | `parallel` | bool | false | Runs in parallel with consecutive `parallel: true` steps |
 | `flow` | string | - | Only `flow`: name of the flow to invoke |
 | `command` | string | - | Only `command`: command to run |
@@ -258,6 +259,60 @@ steps:
     command: ./deploy.sh
 ```
 
+### Dependency graphs and partial execution
+
+Flows default to `execution: sequential`. Set `execution: dag` to schedule steps by explicit dependencies; independent ready steps run concurrently. `max_concurrency` defaults to **4** and must be greater than zero. The limit applies to active main steps in each DAG; nested flows use their own execution policy.
+
+```yaml
+name: ci-dag
+execution: dag
+max_concurrency: 2
+steps:
+  - name: build
+    type: command
+    command: cargo build --workspace
+    cwd: .
+  - name: test
+    type: command
+    needs: [build]
+    command: cargo test --workspace
+    cwd: .
+  - name: lint
+    type: command
+    needs: [build]
+    command: cargo clippy --workspace -- -D warnings
+    cwd: .
+  - name: done
+    type: command
+    needs: [test, lint]
+    command: echo "Checks completed"
+finally:
+  steps:
+    - name: summary
+      type: command
+      command: echo "Status={{flow.status}}"
+```
+
+`needs` requires successful prerequisites. Failed, timed-out, condition-skipped, or declined prerequisites skip their descendants. `on_error: continue` permits independent branches to continue. The default `on_error: stop` stops launching steps, waits for active work, then runs cleanup. `on_success: end` also drains active work before cleanup. Retries finish before dependents are released.
+
+DAG steps reject `parallel: true`, `goto`, and `entry_only_via_goto`. `needs` is only valid on DAG main steps; DAG cleanup remains sequential. Sequential flows retain their existing control flow and parallel groups.
+
+Subflows in simultaneous DAG branches receive separate context snapshots. Child results are published under the invoking step's scope: use `{{steps.[build-flow::compile].stdout}}` for child step `compile` inside DAG step `build-flow`. Sequential subflows retain their existing unqualified result names. Declare `needs` for every branch result consumed by a command, prompt, environment value, or condition.
+
+```bash
+zek graph ci-dag
+zek graph ci-dag --format mermaid
+zek --until test --dry-run ci-dag
+zek --until test ci-dag
+zek --step build ci-dag
+```
+
+Graph output and dry-run share the validated execution plan and execute no commands or AI clients. Graphs identify dependency edges, sequential order and parallel groups, conditional `goto` edges, subflows, and cleanup.
+
+Place `--step` and `--until` **before** the flow name. They are mutually exclusive and apply only to the main block; `finally` is preserved. `--step` runs only the named step, rejecting missing prerequisites or unavailable result references before execution. `--until` selects an inclusive sequential prefix or the DAG target and all its ancestors. Jumps outside the selected set are rejected. Selection validation inspects reusable commands, selected subflows, and cleanup templates. Dynamic access to the entire `steps` object is rejected in partial execution because its required results cannot be determined statically.
+
+Reports distinguish `excluded_steps` (outside the selection) from `skipped_steps` (selected but not executed). JSON reports also include `skip_reasons`, such as `condition`, `confirmation`, `dependency`, `stop`, or `end`.
+
 ### CLI Arguments
 
 Flow variables can be declared at the top level and used in commands, prompts, conditions, and environment values:
@@ -309,6 +364,47 @@ steps:
     command: git checkout -b "{{args.branch}}"
 ```
 
+## Execution history and watch
+
+Every CLI flow execution records a versioned event log and summary in a separate run directory. The run ID appears in the terminal summary and in JSON/Markdown reports. Dry-run and graph views create no history.
+
+```bash
+zek history
+zek history --flow ci-dag --status failed --limit 10
+zek history --json
+zek logs <run-id>
+```
+
+`history` lists newest runs first (default limit 20). Status filters accept `success`, `failed`, `aborted`, `error`, `cancelled`, `running`, and `incomplete`. `logs` prints JSONL events with schema version, run ID, sequence, Unix timestamp in milliseconds, flow scope, step, attempt, status, reason, duration, and exit code where applicable. Attempts and retries, skipped steps, internal errors, global timeout, and finalization are recorded. Concurrent executions use separate files. Earlier valid events remain readable if a final record is truncated; a missing/corrupt summary is recovered from those events.
+
+History records metadata rather than process stdout/stderr, prompts, arguments, variables, or environment values. Use the existing `--log` for text progress logs and `--report` for captured output. Future secret-provider payloads must be redacted before persistence.
+
+Configure storage in global `config.yaml` or project `zek.yaml`:
+
+```yaml
+history:
+  directory: .zek/history
+  retention_days: 30
+  max_runs: 1000
+```
+
+The default directory is `<global-config-directory>/history`. A relative directory in global config resolves against `workdir`; in project config it resolves against the directory containing `zek.yaml`. A project's `history` section replaces the global section; omitted fields use defaults. Retention removes finished, complete runs older than 30 days or beyond the newest 1000 completed runs, before a new run starts and when querying history. A zero value disables that limit. Active/incomplete records are preserved. Each run stores `events.jsonl` and `summary.json`.
+
+Watch performs an initial run, then reruns after relevant file changes:
+
+```bash
+zek watch ci-dag
+zek watch ci-dag --include 'src/**/*.rs' --include 'flows/**' --exclude 'generated/**'
+zek watch ci-dag --debounce-ms 300 --interval-ms 100
+zek --var enabled=true watch ci-dag -- --branch main
+```
+
+The portable observer polls file content (default interval 100 ms) and waits for a quiet debounce window (default 300 ms). Changes during an active run queue one rerun; runs never overlap. Commands, flows, and configuration are reloaded before every run. Invalid YAML is recorded as an error and leaves the observer running so a subsequent correction can trigger another attempt.
+
+Patterns use `/` on all platforms and support `*`, `?`, and `**`; `**/` also matches zero directories. Include/exclude options are repeatable; includes default to `**`. Defaults exclude directories named `target`, `.git`, `.zek`, `history`, `logs`, `cache`, and `.cache`, plus `.log` files, configured history storage, and the explicit `--log` path. Symlinks are not followed. Exclude any other files your flow generates to prevent feedback runs. Watching is rooted in the initial configured workdir.
+
+`Ctrl+C` stops watch, cancels active processes, records cancellation, and exits with code 130. External cancellation does not execute asynchronous `finally` blocks; normal runs and runtime errors retain their cleanup behavior. A global timeout is recorded as `aborted`.
+
 ## CLI Reference
 
 ```bash
@@ -324,6 +420,6 @@ zek <flow>|<command>        # resolves flow first, then command
 zek <flow> --key value      # arguments accessible as {{args.key}}
 ```
 
-Global flags: `--dry-run`, `--verbose/-v`, `--debug`, `--timeout-global <sec>`, `--log <file>` (saves execution log), and `--report <json|markdown>` (exports a report to stdout instead of summary). Use `--var KEY=VALUE` for flow variable overrides. Options must precede the flow/command name: `zek --log run.log deploy` or `zek --report json deploy > report.json`.
+Global flags: `--dry-run`, `--verbose/-v`, `--debug`, `--timeout-global <sec>`, `--log <file>` (saves execution log), and `--report <json|markdown>` (exports a report to stdout instead of summary). Use `--var KEY=VALUE` for flow variable overrides, `--step <name>` for a single step, and `--until <name>` for a prefix or DAG ancestors. `zek graph <flow> [--format text|mermaid]` renders the shared plan. Options must precede the flow/command name: `zek --log run.log deploy` or `zek --report json deploy > report.json`.
 
 Exit codes: `0` success, `2` failed, `3` aborted (infinite loop detected).

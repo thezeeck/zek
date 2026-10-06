@@ -31,3 +31,5 @@ jobs:
         run: cargo +stable check --workspace --all-targets --locked
       - name: Test Windows process management
         run: cargo +stable test -p zek-core --test test_windows_processes --locked
+      - name: Test planning, history and file observation
+        run: cargo +stable test -p zek-core --test test_plan --test test_history --test test_watch --locked

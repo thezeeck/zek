@@ -19,6 +19,9 @@ pub struct SerializedStepResult {
 #[derive(Debug, Default, Clone)]
 pub struct ExecutionContext {
     results: HashMap<String, SerializedStepResult>,
+    pub(crate) recorded: Vec<String>,
+    pub(crate) history: Option<crate::history::HistoryRun>,
+    pub(crate) skip_reasons: HashMap<String, String>,
     /// Orden de grabación, para reportar pasos fallidos de forma determinista.
     order: Vec<String>,
     /// Estado final del flujo (se fija antes de ejecutar `finally`).
@@ -42,10 +45,25 @@ impl ExecutionContext {
 
     pub fn record(&mut self, name: impl Into<String>, result: SerializedStepResult) {
         let name = name.into();
+        if !self.recorded.contains(&name) {
+            self.recorded.push(name.clone());
+        }
         if !self.results.contains_key(&name) {
             self.order.push(name.clone());
         }
         self.results.insert(name, result);
+    }
+
+    pub(crate) fn record_skip(&mut self, name: String, reason: &str) -> Result<(), ZekError> {
+        if let Some(history) = &self.history {
+            history.skip(&self.flow_stack.join("/"), &name, reason)?;
+        }
+        self.skip_reasons.insert(name, reason.into());
+        Ok(())
+    }
+
+    pub(crate) fn clear_recorded(&mut self) {
+        self.recorded.clear();
     }
 
     pub fn get(&self, name: &str) -> Option<&SerializedStepResult> {

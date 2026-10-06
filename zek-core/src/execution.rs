@@ -13,8 +13,10 @@ use crate::flows::{Flow, LoadedFlow};
 use crate::opencode::{
     extract_session_id as extract_opencode_session_id, OpencodeClient, OpencodeOptions,
 };
+use crate::plan::{ExecutionMode, ExecutionPlan, Selection};
 use crate::step::{OnErrorAction, OnSuccessAction, Step, StepType};
 use crate::util::expand_env_vars;
+use futures::stream::{FuturesUnordered, StreamExt};
 
 /// Máximo de saltos por defecto dentro de un bloque `finally`.
 pub const DEFAULT_FINALLY_MAX_JUMPS: usize = 5;
@@ -42,10 +44,14 @@ type ConfirmCb = dyn Fn(&str) -> bool + Send + Sync;
 #[derive(Debug)]
 pub struct FlowReport {
     pub name: String,
+    pub run_id: Option<String>,
     pub status: FlowFinalStatus,
     pub exit_reason: String,
     pub failed_steps: Vec<String>,
     pub skipped_steps: Vec<String>,
+    pub excluded_steps: Vec<String>,
+    /// Skip reasons keyed by step name (condition, confirmation, dependency, stop).
+    pub skip_reasons: HashMap<String, String>,
     pub results: ExecutionContext,
     pub duration: Duration,
 }
@@ -76,6 +82,9 @@ pub struct FlowRunner<'a> {
     confirm: Option<Arc<ConfirmCb>>,
     args: HashMap<String, String>,
     vars: HashMap<String, serde_json::Value>,
+    selection: Selection,
+    history: Option<crate::history::HistoryStore>,
+    history_run: Option<crate::history::HistoryRun>,
 }
 
 impl<'a> FlowRunner<'a> {
@@ -132,6 +141,9 @@ impl<'a> FlowRunner<'a> {
             confirm: None,
             args: HashMap::new(),
             vars: HashMap::new(),
+            selection: Selection::All,
+            history: None,
+            history_run: None,
         }
     }
 
@@ -166,9 +178,72 @@ impl<'a> FlowRunner<'a> {
         self
     }
 
+    /// Select root main steps; nested flows and cleanup retain their full scope.
+    pub fn with_selection(mut self, selection: Selection) -> Self {
+        self.selection = selection;
+        self
+    }
+
+    /// Enable per-run structured history, including retries and cancellation.
+    pub fn with_history(mut self, store: crate::history::HistoryStore) -> Self {
+        self.history = Some(store);
+        self
+    }
+
+    /// Attach a run opened by a host that also needs to record preflight/cancellation.
+    pub fn with_history_run(mut self, run: crate::history::HistoryRun) -> Self {
+        self.history_run = Some(run);
+        self
+    }
+
     pub async fn run(&self) -> Result<FlowReport, ZekError> {
+        let history = match &self.history_run {
+            Some(run) => Some(run.clone()),
+            None => self
+                .history
+                .as_ref()
+                .map(|store| store.start(&self.flow.name))
+                .transpose()?,
+        };
+        let result = self.run_recorded(history.clone()).await;
+        if let Some(history) = history {
+            match &result {
+                Ok(report) => history.finish(report.status.as_str(), Some(report))?,
+                Err(_) => {
+                    history.event(
+                        &self.flow.name,
+                        None,
+                        None,
+                        "internal_error",
+                        Some("error"),
+                        None,
+                        None,
+                    )?;
+                    history.finish("error", None)?;
+                }
+            }
+        }
+        result
+    }
+
+    async fn run_recorded(
+        &self,
+        history: Option<crate::history::HistoryRun>,
+    ) -> Result<FlowReport, ZekError> {
+        let plan = ExecutionPlan::build(self.flow, &self.selection)?;
+        if self.flows.is_none() {
+            plan.validate_inputs(self.flow, self.commands)?;
+        }
+        // Preflight catalog plans before starting any process.
+        if let Some(flows) = self.flows {
+            plan.validate_catalog_inputs(self.flow, self.commands, flows)?;
+            for loaded in flows.values() {
+                ExecutionPlan::build(&loaded.flow, &Selection::All)?;
+            }
+        }
         let start = Instant::now();
         let mut ctx = ExecutionContext::new();
+        ctx.history = history;
         ctx.set_args(self.args.clone());
         let mut vars = self.flow.vars.clone();
         vars.extend(self.vars.clone());
@@ -182,10 +257,13 @@ impl<'a> FlowRunner<'a> {
 
         Ok(FlowReport {
             name: self.flow.name.clone(),
+            run_id: ctx.history.as_ref().map(crate::history::HistoryRun::id),
             status,
             exit_reason,
             failed_steps,
             skipped_steps: skipped,
+            excluded_steps: plan.excluded,
+            skip_reasons: ctx.skip_reasons.clone(),
             results: ctx,
             duration: start.elapsed(),
         })
@@ -233,9 +311,23 @@ impl<'a> FlowRunner<'a> {
         ctx: &mut ExecutionContext,
         skipped: &mut Vec<String>,
     ) -> Result<(FlowFinalStatus, String), ZekError> {
-        let main_result = self
-            .run_steps(&flow.steps, ctx, skipped, flow.max_jumps, false)
-            .await;
+        let selection = if ctx.flow_stack.len() == 1 {
+            &self.selection
+        } else {
+            &Selection::All
+        };
+        let plan = ExecutionPlan::build(flow, selection)?;
+        let main_result = if plan.mode == ExecutionMode::Dag {
+            Box::pin(self.run_dag(flow, &plan, ctx, skipped)).await
+        } else {
+            let steps: Vec<Step> = plan
+                .selected
+                .iter()
+                .map(|&i| flow.steps[i].clone())
+                .collect();
+            self.run_steps(&steps, ctx, skipped, flow.max_jumps, false)
+                .await
+        };
         let (mut status, mut reason) = match &main_result {
             Ok((outcome, any_failed)) => {
                 outcome_to_status(outcome.clone(), *any_failed, flow.max_jumps)
@@ -274,6 +366,145 @@ impl<'a> FlowRunner<'a> {
             return Err(error);
         }
         Ok((status, reason))
+    }
+
+    /// Each active branch owns a context snapshot. Only its own result is
+    /// published; subflow results are namespaced under the invoking DAG step.
+    async fn run_dag(
+        &self,
+        flow: &Flow,
+        plan: &ExecutionPlan,
+        ctx: &mut ExecutionContext,
+        skipped: &mut Vec<String>,
+    ) -> Result<(MainOutcome, bool), ZekError> {
+        let mut state = vec![DagState::Skipped; flow.steps.len()];
+        for &i in &plan.selected {
+            state[i] = DagState::Pending;
+        }
+        let mut active = FuturesUnordered::new();
+        let mut outcome = MainOutcome::NaturalEnd;
+        let mut halted = false;
+        let mut any_failed = false;
+        let mut error = None;
+        loop {
+            if !halted {
+                propagate_dependency_skips(flow, plan, &mut state, ctx, skipped)?;
+                for &i in &plan.selected {
+                    if active.len() >= plan.max_concurrency {
+                        break;
+                    }
+                    if state[i] != DagState::Pending
+                        || !plan.dependencies[i]
+                            .iter()
+                            .all(|&j| state[j] == DagState::Success)
+                    {
+                        continue;
+                    }
+                    let step = &flow.steps[i];
+                    let condition = match self.condition_met(step, ctx) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            error = Some(err);
+                            halted = true;
+                            break;
+                        }
+                    };
+                    let confirmed = condition && (!step.confirm || self.ask_confirm(&step.name));
+                    if !confirmed {
+                        state[i] = DagState::Skipped;
+                        skipped.push(step.name.clone());
+                        ctx.record_skip(
+                            step.name.clone(),
+                            if condition {
+                                "confirmation"
+                            } else {
+                                "condition"
+                            },
+                        )?;
+                        continue;
+                    }
+                    state[i] = DagState::Running;
+                    self.emit_started(
+                        &step.name,
+                        plan.selected.iter().position(|&j| j == i).unwrap(),
+                        plan.selected.len(),
+                    );
+                    let mut branch = ctx.clone();
+                    // Clear inherited results' write tracking before running a branch.
+                    branch.clear_recorded();
+                    active.push(async move {
+                        let result = Box::pin(self.run_step(step, &mut branch)).await;
+                        (i, result, branch)
+                    });
+                }
+            }
+            if let Some((i, result, branch)) = active.next().await {
+                let step = &flow.steps[i];
+                match result {
+                    Ok(result) => {
+                        for name in &branch.recorded {
+                            if name != &step.name {
+                                if let Some(value) = branch.get(name) {
+                                    ctx.record(format!("{}::{name}", step.name), value.clone());
+                                }
+                            }
+                        }
+                        ctx.record(&step.name, result.clone());
+                        self.emit_finished(&step.name, result.status.clone());
+                        let success = result.status.is_success();
+                        state[i] = if success {
+                            DagState::Success
+                        } else {
+                            DagState::Failed
+                        };
+                        any_failed |= !success;
+                        if !halted {
+                            match next_action(step, success, false) {
+                                NextAction::Stop => {
+                                    halted = true;
+                                    outcome = MainOutcome::Stop(step.name.clone());
+                                }
+                                NextAction::End => {
+                                    halted = true;
+                                    outcome = MainOutcome::End(step.name.clone());
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        state[i] = DagState::Failed;
+                        halted = true;
+                        any_failed = true;
+                        if error.is_none() {
+                            error = Some(err);
+                        }
+                    }
+                }
+                continue;
+            }
+            if !halted && state.contains(&DagState::Pending) {
+                // No active work: newly skipped prerequisites need propagation.
+                continue;
+            }
+            break;
+        }
+        propagate_dependency_skips(flow, plan, &mut state, ctx, skipped)?;
+        for &i in &plan.selected {
+            if state[i] == DagState::Pending {
+                skipped.push(flow.steps[i].name.clone());
+                let reason = if matches!(outcome, MainOutcome::End(_)) {
+                    "end"
+                } else {
+                    "stop"
+                };
+                ctx.record_skip(flow.steps[i].name.clone(), reason)?;
+            }
+        }
+        if let Some(error) = error {
+            return Err(error);
+        }
+        Ok((outcome, any_failed))
     }
 
     /// Recorre una secuencia de steps (main o `finally`) aplicando condiciones,
@@ -316,12 +547,14 @@ impl<'a> FlowRunner<'a> {
 
             if step.entry_only_via_goto && !ctx.was_targeted(&step.name) {
                 skipped.push(step.name.clone());
+                ctx.record_skip(step.name.clone(), "entry_only_via_goto")?;
                 idx += 1;
                 continue;
             }
 
             if !self.condition_met(step, ctx)? {
                 skipped.push(step.name.clone());
+                ctx.record_skip(step.name.clone(), "condition")?;
                 idx += 1;
                 continue;
             }
@@ -330,6 +563,7 @@ impl<'a> FlowRunner<'a> {
 
             if step.confirm && !self.ask_confirm(&step.name) {
                 skipped.push(step.name.clone());
+                ctx.record_skip(step.name.clone(), "confirmation")?;
                 idx += 1;
                 continue;
             }
@@ -382,14 +616,17 @@ impl<'a> FlowRunner<'a> {
         for step in group {
             if step.entry_only_via_goto && !ctx.was_targeted(&step.name) {
                 skipped.push(step.name.clone());
+                ctx.record_skip(step.name.clone(), "entry_only_via_goto")?;
                 continue;
             }
             if !self.condition_met(step, ctx)? {
                 skipped.push(step.name.clone());
+                ctx.record_skip(step.name.clone(), "condition")?;
                 continue;
             }
             if step.confirm && !self.ask_confirm(&step.name) {
                 skipped.push(step.name.clone());
+                ctx.record_skip(step.name.clone(), "confirmation")?;
                 continue;
             }
             to_run.push(step);
@@ -479,6 +716,8 @@ impl<'a> FlowRunner<'a> {
         let mut attempts = 0;
         let status = loop {
             attempts += 1;
+            let attempt_start = Instant::now();
+            record_attempt(ctx, step, attempts, "attempt_started", None, None)?;
             let status = match step.step_type {
                 StepType::Command => self.run_command_step(step, ctx).await?,
                 StepType::Claude => self.run_claude_step(step, ctx).await?,
@@ -490,6 +729,14 @@ impl<'a> FlowRunner<'a> {
                     )));
                 }
             };
+            record_attempt(
+                ctx,
+                step,
+                attempts,
+                "attempt_finished",
+                Some(&status),
+                Some(attempt_start.elapsed()),
+            )?;
             if status.is_success() || attempts > step.retries {
                 break status;
             }
@@ -525,6 +772,8 @@ impl<'a> FlowRunner<'a> {
         let mut attempts = 0;
         let status = loop {
             attempts += 1;
+            let attempt_start = Instant::now();
+            record_attempt(ctx, step, attempts, "attempt_started", None, None)?;
             // Cada intento parte del contexto del padre. Los resultados de un
             // intento fallido no contaminan las condiciones del siguiente.
             let mut attempt_ctx = ctx.clone();
@@ -533,6 +782,17 @@ impl<'a> FlowRunner<'a> {
                 Box::pin(self.run_flow_internal(&loaded.flow, &mut attempt_ctx, &mut sub_skipped))
                     .await;
             let (status, _reason) = result?;
+            if let Some(history) = &ctx.history {
+                history.event(
+                    &ctx.flow_stack.join("/"),
+                    Some(&step.name),
+                    Some(attempts),
+                    "attempt_finished",
+                    Some(status.as_str()),
+                    Some(attempt_start.elapsed().as_millis() as u64),
+                    None,
+                )?;
+            }
             if status == FlowFinalStatus::Success || attempts > step.retries {
                 *ctx = attempt_ctx;
                 break status;
@@ -653,6 +913,66 @@ impl<'a> FlowRunner<'a> {
 
         Ok(status)
     }
+}
+
+fn record_attempt(
+    ctx: &ExecutionContext,
+    step: &Step,
+    attempt: u32,
+    kind: &str,
+    status: Option<&StepExecutionStatus>,
+    duration: Option<Duration>,
+) -> Result<(), ZekError> {
+    if let Some(history) = &ctx.history {
+        history.event(
+            &ctx.flow_stack.join("/"),
+            Some(&step.name),
+            Some(attempt),
+            kind,
+            status.map(StepExecutionStatus::status_str),
+            duration.map(|d| d.as_millis() as u64),
+            status.and_then(StepExecutionStatus::exit_code),
+        )?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DagState {
+    Pending,
+    Running,
+    Success,
+    Failed,
+    Skipped,
+}
+impl DagState {
+    fn unavailable(self) -> bool {
+        matches!(self, Self::Failed | Self::Skipped)
+    }
+}
+
+fn propagate_dependency_skips(
+    flow: &Flow,
+    plan: &ExecutionPlan,
+    state: &mut [DagState],
+    ctx: &mut ExecutionContext,
+    skipped: &mut Vec<String>,
+) -> Result<(), ZekError> {
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &i in &plan.selected {
+            if state[i] == DagState::Pending
+                && plan.dependencies[i].iter().any(|&j| state[j].unavailable())
+            {
+                state[i] = DagState::Skipped;
+                skipped.push(flow.steps[i].name.clone());
+                ctx.record_skip(flow.steps[i].name.clone(), "dependency")?;
+                changed = true;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone)]

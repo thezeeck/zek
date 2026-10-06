@@ -17,6 +17,9 @@ pub const FLOWS_DIR: &str = "flows";
 pub struct Config {
     pub workdir: PathBuf,
 
+    #[serde(default)]
+    pub history: crate::history::HistoryConfig,
+
     /// Idioma de los mensajes (`en`/`es`). Por defecto `en`.
     #[serde(default)]
     pub language: Language,
@@ -27,6 +30,9 @@ pub struct Config {
 pub struct ProjectConfig {
     #[serde(default)]
     pub workdir: Option<PathBuf>,
+
+    #[serde(default)]
+    pub history: Option<crate::history::HistoryConfig>,
 
     #[serde(default)]
     pub language: Option<Language>,
@@ -51,6 +57,7 @@ impl Config {
     pub fn new(workdir: PathBuf) -> Self {
         Self {
             workdir,
+            history: crate::history::HistoryConfig::default(),
             language: Language::default(),
         }
     }
@@ -64,6 +71,14 @@ impl Config {
             } else {
                 base_dir.join(workdir)
             };
+        }
+        if let Some(mut history) = project.history {
+            if let Some(directory) = &mut history.directory {
+                if directory.is_relative() {
+                    *directory = base_dir.join(&*directory);
+                }
+            }
+            self.history = history;
         }
         if let Some(language) = project.language {
             self.language = language;
@@ -140,6 +155,19 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    pub fn history_store(&self) -> Result<crate::history::HistoryStore, ZekError> {
+        let directory = match &self.history.directory {
+            Some(directory) if directory.is_absolute() => directory.clone(),
+            Some(directory) => self.workdir.join(directory),
+            None => config_dir()?.join("history"),
+        };
+        Ok(crate::history::HistoryStore::new(
+            directory,
+            self.history.retention_days,
+            self.history.max_runs,
+        ))
     }
 
     pub fn commands_dir(&self) -> PathBuf {
@@ -342,6 +370,7 @@ mod tests {
         let mut config = Config::new(PathBuf::from("/global"));
         config.language = Language::Es;
         let project = ProjectConfig {
+            history: None,
             workdir: Some(PathBuf::from(".")),
             language: None,
         };
@@ -355,6 +384,7 @@ mod tests {
     fn apply_project_respeta_workdir_absoluto_y_language() {
         let mut config = Config::new(PathBuf::from("/global"));
         let project = ProjectConfig {
+            history: None,
             workdir: Some(PathBuf::from("/absoluto")),
             language: Some(Language::Es),
         };

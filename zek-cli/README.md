@@ -117,6 +117,10 @@ A relative project `workdir` is resolved from the directory containing `zek.yaml
 | `zek config set-language <en\|es>` | Change the message language |
 | `zek list` | List commands and flows |
 | `zek commands <name>` | Show a reusable command's definition |
+| `zek history [--flow name] [--status status] [--limit n] [--json]` | Query recorded executions |
+| `zek logs <run-id>` | Read structured execution events |
+| `zek watch <flow> [options] [-- arguments]` | Rerun a flow when files change |
+| `zek graph <flow> [--format text\|mermaid]` | Render a validated flow graph without execution |
 | `zek ask "<message>"` | Send a standalone prompt to Claude |
 | `zek completion --shell <shell>` | Generate shell completions |
 | `zek <name> [--key value]` | Run a flow or command |
@@ -133,9 +137,52 @@ Place global options **before** the flow or command name:
 | `--timeout-global <seconds>` | Limit the whole flow, or override a direct command's timeout |
 | `--log <file>` | Write execution events to a log file |
 | `--report <json\|markdown>` | Export a flow report to stdout |
+| `--step <name>` | Run a single main step, validating its required inputs |
+| `--until <name>` | Run an inclusive prefix or DAG target and its ancestors |
 | `--var KEY=VALUE` | Override a root flow variable; repeat before the flow name |
 
 Plan previews and structured reports apply to flows. Direct commands stream their output.
+
+## Graphs and selected execution
+
+Set `execution: dag` in a flow and declare `needs: [build]` on dependent steps. Independent ready steps run concurrently, up to `max_concurrency` (default 4, positive integer) active main steps per DAG. Dependencies require success; failed or skipped prerequisites skip their descendants. `on_error: stop` drains active steps before cleanup; `continue` preserves independent branches. DAG mode rejects legacy parallel flags and jumps, while sequential mode remains the default.
+
+```bash
+zek graph ci-dag
+zek graph ci-dag --format mermaid
+zek --until test --dry-run ci-dag
+zek --until test --report json ci-dag
+zek --step build ci-dag
+```
+
+`--step` and `--until` are mutually exclusive and must precede the flow name; trailing options remain ordinary flow arguments. `--step` executes only the named main step. `--until` selects a sequential prefix or the DAG target with all its ancestors. Both retain `finally`; unknown names, missing inputs, and jumps outside the selection fail before processes start. Validation includes templates in reusable commands, nested flows, and cleanup. Dynamic lookups of the whole `steps` object are rejected for partial execution.
+
+Dry-run shows the same selected nodes as `graph`. JSON and Markdown reports separate excluded steps from selected steps skipped by conditions or dependency failures. JSON adds `excluded_steps` and `skip_reasons` alongside `skipped_steps`.
+
+Concurrent subflows keep branch results isolated. DAG child results use names such as `build-flow::compile`, accessible as `{{steps.[build-flow::compile].stdout}}`. For a complete YAML example and scheduling rules, see [dependency graphs](../README.md#dependency-graphs-and-partial-execution).
+
+## History and watch
+
+CLI flow executions now persist per-run events and summaries. Use the run ID printed in the summary or exported report:
+
+```bash
+zek history --flow ci --status failed --limit 10
+zek history --json
+zek logs <run-id>
+zek watch ci --debounce-ms 300 --interval-ms 100
+zek watch ci --include 'src/**/*.rs' --include 'flows/**' --exclude 'generated/**'
+zek --var enabled=true watch ci -- --branch main
+```
+
+`logs` returns versioned JSONL events for attempts, retries, skipped steps, errors, cancellation, and finalization. It records metadata; process output remains available through `--report`, and `--log` preserves its text progress format. Dry-run and graph output create no history.
+
+`history` defaults to the newest 20 runs; status filters include `success`, `failed`, `aborted`, `error`, `cancelled`, `running`, and `incomplete`. Configure `history.directory`, `retention_days` (default 30), and `max_runs` (default 1000) in global/project YAML. Zero disables the corresponding retention limit; active/incomplete records are preserved. The default location is the global config directory's `history/` subdirectory. Relative project paths resolve beside `zek.yaml`; relative global paths resolve against workdir. A project history section replaces global history settings.
+
+Watch runs immediately, then polls file content every 100 ms and debounces changes for 300 ms by default. It keeps one run active and queues one rerun for changes received during that run. Definitions and configuration reload for each attempt; invalid YAML is recorded and observation continues. `Ctrl+C` cancels active processes, records cancellation, and exits 130. Cancellation does not run async cleanup.
+
+Repeat `--include` / `--exclude` with glob patterns using `/`, `*`, `?`, and `**` (`**/` can match zero directories). Includes default to `**`. Built-in exclusions cover `target`, `.git`, `.zek`, `history`, `logs`, `cache`, `.cache`, `.log` files, configured history paths, and `--log`. Symlinks are skipped. Explicitly exclude other generated output files. Watch remains rooted in its initial workdir. Flow arguments follow `--`; global options precede `watch`.
+
+See the [history and watch reference](../README.md#execution-history-and-watch) for storage layout and recovery behavior.
 
 ## Parameters and AI steps
 

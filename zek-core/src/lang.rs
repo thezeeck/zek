@@ -44,6 +44,33 @@ pub fn current() -> Language {
 
 /// Catálogo de mensajes traducidos (en/es).
 pub struct Messages {
+    pub history_run_finished: &'static str,
+    pub history_invalid_id: &'static str,
+    pub history_symlink: &'static str,
+    pub history_no_records: &'static str,
+    pub watch_no_ancestor: &'static str,
+
+    pub err_watch_flow: &'static str,
+    pub err_watch_dry_run: &'static str,
+    pub watch_started: &'static str,
+    pub watch_scan_error: &'static str,
+    pub history_heading: &'static str,
+    pub history_run_id: &'static str,
+
+    pub plan_duplicate: &'static str,
+    pub plan_concurrency: &'static str,
+    pub plan_needs_mode: &'static str,
+    pub plan_dag_controls: &'static str,
+    pub plan_dependency_missing: &'static str,
+    pub plan_dependency_self: &'static str,
+    pub plan_cycle: &'static str,
+    pub plan_finally_invalid: &'static str,
+    pub plan_unknown_step: &'static str,
+    pub plan_excluded_dependency: &'static str,
+    pub plan_external_goto: &'static str,
+    pub plan_unavailable_result: &'static str,
+    pub err_selection_flow: &'static str,
+
     // Errores de `error.rs`.
     pub err_no_home_dir: &'static str,
     pub err_config_not_found: &'static str,
@@ -171,6 +198,33 @@ pub struct Messages {
 }
 
 pub const EN: Messages = Messages {
+    history_run_finished: "The history run has already finished",
+history_invalid_id: "Invalid run ID",
+history_symlink: "History symlinks are unsupported",
+history_no_records: "No readable history records",
+watch_no_ancestor: "Watch path has no existing ancestor",
+
+    err_watch_flow: "watch requires an existing flow: {}",
+err_watch_dry_run: "watch cannot be combined with --dry-run",
+watch_started: "Watching {} (Ctrl+C to stop)",
+watch_scan_error: "Watch scan failed: {}",
+history_heading: "Run ID  Flow  Status  Started (Unix ms)",
+history_run_id: "Run ID: {}",
+
+    plan_duplicate: "Duplicate step names",
+    plan_concurrency: "max_concurrency must be greater than zero",
+    plan_needs_mode: "Step '{}': needs requires execution: dag",
+    plan_dag_controls: "DAG step '{}': parallel, goto and entry_only_via_goto are unsupported",
+    plan_dependency_missing: "Step '{}': unknown dependency '{}'",
+    plan_dependency_self: "Step '{}': self dependency",
+    plan_cycle: "Dependency cycle in execution: dag",
+    plan_finally_invalid: "Finally step '{}': finally is sequential and cannot declare needs or DAG parallel groups",
+    plan_unknown_step: "Unknown selected step '{}'",
+    plan_excluded_dependency: "Selected step '{}' requires excluded step '{}'",
+    plan_external_goto: "Step '{}': goto '{}' is outside the selected plan",
+    plan_unavailable_result: "Step '{}': required result '{}' is unavailable in the selected plan",
+    err_selection_flow: "--step and --until require a flow",
+
     err_no_home_dir: "could not determine the user's home directory",
     err_config_not_found: "configuration not found: {}",
     err_io: "I/O error: {}",
@@ -293,6 +347,33 @@ pub const EN: Messages = Messages {
 };
 
 pub const ES: Messages = Messages {
+    history_run_finished: "La ejecución del historial ya terminó",
+history_invalid_id: "ID de ejecución inválido",
+history_symlink: "El historial no admite enlaces simbólicos",
+history_no_records: "No hay registros legibles de historial",
+watch_no_ancestor: "La ruta observada no tiene un directorio padre existente",
+
+    err_watch_flow: "watch requiere un flujo existente: {}",
+err_watch_dry_run: "watch no puede combinarse con --dry-run",
+watch_started: "Observando {} (Ctrl+C para detener)",
+watch_scan_error: "Error al observar archivos: {}",
+history_heading: "ID de ejecución  Flujo  Estado  Inicio (Unix ms)",
+history_run_id: "ID de ejecución: {}",
+
+    plan_duplicate: "Nombres de pasos duplicados",
+    plan_concurrency: "max_concurrency debe ser mayor que cero",
+    plan_needs_mode: "Paso '{}': needs requiere execution: dag",
+    plan_dag_controls: "Paso DAG '{}': parallel, goto y entry_only_via_goto no están permitidos",
+    plan_dependency_missing: "Paso '{}': dependencia inexistente '{}'",
+    plan_dependency_self: "Paso '{}': dependencia hacia sí mismo",
+    plan_cycle: "Ciclo de dependencias en execution: dag",
+    plan_finally_invalid: "Paso finally '{}': finally es secuencial y no admite needs ni grupos paralelos en DAG",
+    plan_unknown_step: "Paso seleccionado inexistente '{}'",
+    plan_excluded_dependency: "El paso seleccionado '{}' requiere el paso excluido '{}'",
+    plan_external_goto: "Paso '{}': goto '{}' está fuera del plan seleccionado",
+    plan_unavailable_result: "Paso '{}': el resultado requerido '{}' no está disponible en el plan seleccionado",
+    err_selection_flow: "--step y --until requieren un flujo",
+
     err_no_home_dir: "no se pudo determinar el directorio home del usuario",
     err_config_not_found: "no se encontró la configuración: {}",
     err_io: "error de I/O: {}",

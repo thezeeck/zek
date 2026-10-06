@@ -82,6 +82,10 @@ fn default_timeout() -> u32 {
 /// mientras que en `finally` es `continue`. Resolver con [`Step::effective_on_error`].
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Step {
+    /// Dependencies in an explicitly declared DAG.
+    #[serde(default)]
+    pub needs: Vec<String>,
+
     /// Nombre único dentro del flujo (obligatorio).
     pub name: String,
 
